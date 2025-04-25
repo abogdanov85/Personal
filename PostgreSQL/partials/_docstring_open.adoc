@@ -1,0 +1,6 @@
+// tag::{object_name}[]
+'''
+[id={object_name},role=docstring]
+--
+<<{object_name}, #>>
+*`{object_name}`* — _{object_type}_
