@@ -41,6 +41,8 @@ Right now projections can be automatically substituted only if:
 3. All other expressions in target list, `ORDER BY` / `GROUP BY` clauses refers only to scalar attributes of projection.
 
 Example of using projections:
+
+```sql
 create extension OOPS;
 create table lineitem(
 l_orderkey integer,
@@ -109,3 +111,4 @@ l_linestatus
 order by
 l_returnflag,
 l_linestatus;
+```
