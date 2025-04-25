@@ -8,7 +8,7 @@ CREATE PROJECTION xxx OF TABLE yyy(column1, column2,...) GROUP BY (column1, colu
 
 But right now it can be done using function:
 
-```postgres
+```sql
 create_projection(projection_name text, source_table regclass, vector_columns text[], scalar_columns text[] default null, order_by text default null)
 ```
 
