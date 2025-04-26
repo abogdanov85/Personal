@@ -3,7 +3,7 @@
 <?asciidoc-numbered?>
 <article xmlns="http://docbook.org/ns/docbook" xmlns:xl="http://www.w3.org/1999/xlink" version="5.0" xml:lang="en">
 <info>
-<title><phrase role="commercial">OOPS</phrase> projections and automatic table substitution</title>
+<title>OOPS projections and automatic table substitution</title>
 <date>2025-04-26</date>
 <author>
 <personname>
@@ -13,10 +13,10 @@
 </author>
 <authorinitials>AB</authorinitials>
 </info>
-<simpara>The <phrase role="commercial">OOPS</phrase> provides some functions simplifying creation and usage of projections.</simpara>
-<simpara>In future it may be added to <phrase role="commercial">SQL</phrase> grammar, so that it is possible to write:</simpara>
+<simpara>The <phrase role="commercial">OOPS</phrase> provides some functions that simplify the creation and use of projections.</simpara>
+<simpara>In the future it may be added to the <phrase role="commercial">SQL</phrase> grammar, so that it is possible to write:</simpara>
 <programlisting language="sql" linenumbering="unnumbered">CREATE PROJECTION xxx OF TABLE yyy(column1, column2, ...) GROUP BY (column1, column2, ...)</programlisting>
-<simpara>But right now it can be done using function:</simpara>
+<simpara>But for now it can be done using function:</simpara>
 <simpara><?asciidoc-hr?></simpara>
 <para xml:id="create_projection" role="docstring">
 <simpara><link linkend="create_projection">#</link>
@@ -27,7 +27,7 @@
     vector_columns text[],
     scalar_columns text[] default null,
     order_by text default null)</programlisting>
-<simpara>Creates projection of the given table.</simpara>
+<simpara>Creates a projection of the given table.</simpara>
 <bridgehead xml:id="_parameters" renderas="sect2">Parameters</bridgehead>
 <variablelist xml:id="create_projection:projection_name">
 <varlistentry>
@@ -72,31 +72,30 @@
 <simpara>The <literal>create_projection(PNAME, ...)</literal> function does the following:</simpara>
 <orderedlist numeration="arabic">
 <listitem>
-<simpara>Creates projection table with specified name and attributes.</simpara>
+<simpara>Creates a projection table with specified name and attributes.</simpara>
 </listitem>
 <listitem>
-<simpara>Creates <literal>PNAME_refresh()</literal> functions which can be used to update projection.</simpara>
+<simpara>Creates <literal>PNAME_refresh()</literal> functions that can be used to update the projection.</simpara>
 </listitem>
 <listitem>
-<simpara>Inserts information about created projection in <literal>OOPS_projections</literal> table.</simpara>
+<simpara>Inserts information about the created projection into <literal>OOPS_projections</literal> table.</simpara>
 </listitem>
 </orderedlist>
-<simpara>This table is used by optimizer to automatically substitute table with projection.</simpara>
+<simpara>This table is used by the optimizer to automatically substitute table with projection.</simpara>
 <simpara><?asciidoc-hr?></simpara>
 </para>
 <simpara>The <literal><xref linkend="create_projection:order_by"/></literal> attribute is one of the OOPS projection vector columns by which data is sorted.
-Presence of such column in projection allows to incrementally update projection.
-Generated <literal>PNAME_refresh()</literal> method calls <literal>populate()</literal> method, selecting from original table only rows with <literal>order_by</literal> column value greater than maximal value of this column
-in projection.
-It assumes that <literal>order_by</literal> is unique or at least refresh is done at the moment when there is some gap in collected events.</simpara>
+The presence of such a column in the projection allows the projection to be updated incrementally.
+The generated <literal>PNAME_refresh()</literal> method calls the <literal>populate()</literal> method, selecting only rows from the original table where the <literal>order_by</literal> column value is greater than the maximum value of that column in the projection.
+It assumes that <literal>order_by</literal> is unique or at least that the refresh is done at the moment when there is a gap in the collected events.</simpara>
 <simpara>Like materialized views, <phrase role="commercial">OOPS</phrase> projections are not updated automatically.
-It is responsibility of a programmer to periodically refresh them.
-The most convenient way is to use generated <literal>PNAME_refresh()</literal> function.
-If <literal><xref linkend="create_projection:order_by"/></literal> attribute is specified, this function imports from original table only the new data (not present in projection).</simpara>
+It is the programmer&#8217;s responsibility to update them periodically.
+The most convenient way is to use the generated <literal>PNAME_refresh()</literal> function.
+If the <literal><xref linkend="create_projection:order_by"/></literal> attribute is specified, this function will import only the new data (not present in the projection) from the original table.</simpara>
 <simpara>The main advantage of <phrase role="commercial">OOPS</phrase> projection mechanism is that it allows to automatically substitute queries on original tables with projections.
-There is <literal>OOPS.auto_substitute_projections</literal> configuration parameter which allows to switch on such substitution.
-By default it is switched off, because OOPS projections may be not synchronized with original table and query on projection may return different result.</simpara>
-<simpara>Right now projections can be automatically substituted only if:</simpara>
+There is a configuration parameter <literal>OOPS.auto_substitute_projections</literal> that allows to enable such substitution.
+By default it is disabled, because <phrase role="commercial">OOPS</phrase> projections may not be synchronized with the original table and a query on a projection may return different result.</simpara>
+<simpara>Currently, projections can only be substituted automatically if:</simpara>
 <orderedlist numeration="arabic">
 <listitem>
 <simpara>Query doesn’t contain JOINs.</simpara>
@@ -105,8 +104,7 @@ By default it is switched off, because OOPS projections may be not synchronized 
 <simpara>Query performs aggregation of vector (tile) columns.</simpara>
 </listitem>
 <listitem>
-<simpara>All other expressions in target list, <literal>ORDER BY</literal> / <literal>GROUP BY</literal>
-clauses refer only to scalar attributes of projection.</simpara>
+<simpara>All other expressions in the target list, <literal>ORDER BY</literal> / <literal>GROUP BY</literal> clauses refer only to scalar attributes of the projection.</simpara>
 </listitem>
 </orderedlist>
 <simpara>Example of using projections:</simpara>
@@ -139,16 +137,16 @@ create_projection(
     array['l_shipdate','l_quantity','l_extendedprice','l_discount','l_tax'],
     array['l_returnflag','l_linestatus']);
 
--- Switching on timing to see the difference
+-- Enable timing to see the difference
 \timing
 
--- Copying demo table
+-- Copy demo table
 copy lineitem from '/mnt/data/lineitem.tbl' delimiter '|' csv;
 
--- Refreshing the projections
+-- Refresh the projections
 select OOPS_lineitem_refresh();
 
--- First let's make a query without OOPS substitution
+-- First let's run a query without OOPS substitution
 select
     l_returnflag,
     l_linestatus,
@@ -171,7 +169,7 @@ order by
     l_returnflag,
     l_linestatus;</programlisting>
 <simpara>output from previous code block</simpara>
-<programlisting language="sql" linenumbering="unnumbered">-- Now let's make the same query but with OOPS substitution set to ON
+<programlisting language="sql" linenumbering="unnumbered">-- Now let's run the same query but with OOPS substitution set to ON
 set OOPS.auto_substitute_projections TO on;
 
 select

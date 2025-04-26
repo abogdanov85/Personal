@@ -19,7 +19,7 @@ create_projection(
 // Краткое описание заворачиваем в тэг, чтобы его можно было использовать в других местах, 
 // например в сниппетах в результатах поиска
 // tag::short-description[]
-Creates projection of the given table.
+Creates a projection of the given table.
 // end::short-description[]
 
 // Заголовок, не входящий в структуру документа, 
@@ -61,13 +61,13 @@ include::../templates/parameter_definition.adoc[]
 The `+create_projection(PNAME, ...)+` function does the following:
 
 [arabic]
-. Creates projection table with specified name and attributes.
+. Creates a projection table with specified name and attributes.
 // Здесь и далее нужна будет ссылка на описание (докстринг) PNAME_refresh()
-. Creates `+PNAME_refresh()+` functions which can be used to update projection.
+. Creates `+PNAME_refresh()+` functions that can be used to update the projection.
 // Здесь нужна будет ссылка на описание (докстринг) OOPS_projections
-. Inserts information about created projection in `+OOPS_projections+` table.
+. Inserts information about the created projection into `+OOPS_projections+` table.
 
-This table is used by optimizer to automatically substitute table with projection.
+This table is used by the optimizer to automatically substitute table with projection.
 
 include::../templates/docstring_close.adoc[]
 

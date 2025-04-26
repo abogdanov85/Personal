@@ -1,8 +1,7 @@
-= [.commercial]#OOPS# projections and automatic table substitution
+= OOPS projections and automatic table substitution
 Alexey Bogdanov
 :keywords: OOPS, projection, vector
 :lang: en
-:description: This article describes the usage of OOPS projections
 :version: 1
 :source-highlighter: highlight.js
 :highlightjs-theme: paraiso-light
@@ -12,25 +11,25 @@ Alexey Bogdanov
 // например в сниппетах в результатах поиска
 // tag::short-description[]
 // Здесь хорошо бы дать расшифровку аббревиатуры OOPS в скобках, но мне не удалось ее найти
-The [.commercial]#OOPS# provides some functions simplifying creation and usage of projections.
+The [.commercial]#OOPS# provides some functions that simplify the creation and use of projections.
 // end::short-description[]
 
 // Предположим, что описанный функционал появится начиная с версии 2
 // В таком случае данный фрагмент показываем только, если версия меньше 2
 ifeval::[{version} < 2]
 
-In future it may be added to [.commercial]#SQL# grammar, so that it is possible to write:
+In the future it may be added to the [.commercial]#SQL# grammar, so that it is possible to write:
 
 endif::[]
-
 
 // Вариант для версий начиная с 2
 ifeval::[{version} >= 2]
 
-To use OOPS you can run this code:
+To use OOPS, you can execute this code:
 
 endif::[]
 
+// Общая часть для всех версий
 
 [source,sql]
 ----
@@ -40,40 +39,41 @@ CREATE PROJECTION xxx OF TABLE yyy(column1, column2, ...) GROUP BY (column1, col
 // Этот фрагмент тоже показываем только, если версия меньше 2
 ifeval::[{version} < 2]
 
-But right now it can be done using function:
+But for now it can be done using function:
 
+// Докстринг функции create_projection
 include::docstrings/function_create_projection.adoc[]
 
-The `<<create_projection:order_by>>` attribute is one of the OOPS projection vector columns by which data is sorted. 
-Presence of such column in projection allows to incrementally update projection.
+The `<<create_projection:order_by>>` attribute is one of the OOPS projection vector columns by which data is sorted.
+The presence of such a column in the projection allows the projection to be updated incrementally. 
 // Здесь нужны будут ссылки на описание (докстринги) этих методов
-Generated `+PNAME_refresh()+` method calls `+populate()+` method, selecting from original table only rows with `+order_by+` column value greater than maximal value of this column
-in projection.
-It assumes that `+order_by+` is unique or at least refresh is done at the moment when there is some gap in collected events.
+The generated `+PNAME_refresh()+` method calls the `+populate()+` method, selecting only rows from the original table where the `+order_by+` column value is greater than the maximum value of that column in the projection.
+It assumes that `+order_by+` is unique or at least that the refresh is done at the moment when there is a gap in the collected events.
 
 Like materialized views, [.commercial]#OOPS# projections are not updated automatically.
-It is responsibility of a programmer to periodically refresh them.
-The most convenient way is to use generated `+PNAME_refresh()+` function.
-If `<<create_projection:order_by>>` attribute is specified, this function imports from original table only the new data (not present in projection).
+It is the programmer's responsibility to update them periodically. 
+The most convenient way is to use the generated `+PNAME_refresh()+` function.
+If the `<<create_projection:order_by>>` attribute is specified, this function will import only the new data (not present in the projection) from the original table.
 
 endif::[]
 
+// Общая часть для всех версий
+
 The main advantage of [.commercial]#OOPS# projection mechanism is that it allows to automatically substitute queries on original tables with projections.
 // Здесь нужна будет ссылка на описание параметра OOPS.auto_substitute_projections
-There is `+OOPS.auto_substitute_projections+` configuration parameter which allows to switch on such substitution.
+There is a configuration parameter `+OOPS.auto_substitute_projections+` that allows to enable such substitution.
 // Здесь я исправил projects на projections, но не уверен на 100%, что это правильно (не хватает данных)
-By default it is switched off, because OOPS projections may be not synchronized with original table and query on projection may return different result.
+By default it is disabled, because [.commercial]#OOPS# projections may not be synchronized with the original table and a query on a projection may return different result.
 
 // Этот фрагмент тоже показываем только, если версия меньше 2
 ifeval::[{version} < 2]
 
-Right now projections can be automatically substituted only if:
+Currently, projections can only be substituted automatically if:
 
 [arabic]
 . Query doesn’t contain JOINs.
 . Query performs aggregation of vector (tile) columns.
-. All other expressions in target list, `+ORDER BY+` / `+GROUP BY+`
-clauses refer only to scalar attributes of projection.
+. All other expressions in the target list, `+ORDER BY+` / `+GROUP BY+` clauses refer only to scalar attributes of the projection.
 
 Example of using projections:
 
@@ -112,16 +112,16 @@ create_projection(
     array['l_shipdate','l_quantity','l_extendedprice','l_discount','l_tax'],
     array['l_returnflag','l_linestatus']);
 
--- Switching on timing to see the difference
+-- Enable timing to see the difference
 \timing
 
--- Copying demo table
+-- Copy demo table
 copy lineitem from '/mnt/data/lineitem.tbl' delimiter '|' csv;
 
--- Refreshing the projections
+-- Refresh the projections
 select OOPS_lineitem_refresh();
 
--- First let's make a query without OOPS substitution
+-- First let's run a query without OOPS substitution
 select
     l_returnflag,
     l_linestatus,
@@ -153,7 +153,7 @@ output from previous code block
 //[source,postgres]
 [source,sql]
 ----
--- Now let's make the same query but with OOPS substitution set to ON
+-- Now let's run the same query but with OOPS substitution set to ON
 set OOPS.auto_substitute_projections TO on;
 
 select
@@ -187,6 +187,7 @@ output from previous code block
 endif::[]
 
 // Делаю прямо тут кастомный css для блоков вывода, чтобы просто показать идею разных литеральных блоков (для ввода и вывода)
+// И здесь же выделяю жирным фрагменты commercial
 ++++
 <style>
 .output {

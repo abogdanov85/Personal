@@ -5,7 +5,6 @@
 <meta http-equiv="X-UA-Compatible" content="IE=edge">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <meta name="generator" content="Asciidoctor 2.0.23">
-<meta name="description" content="This article describes the usage of OOPS projections">
 <meta name="keywords" content="OOPS, projection, vector">
 <meta name="author" content="Alexey Bogdanov">
 <title>OOPS projections and automatic table substitution</title>
@@ -440,17 +439,17 @@ body.book #toc,body.book #preamble,body.book h1.sect0,body.book .sect1>h2{page-b
 </head>
 <body class="article">
 <div id="header">
-<h1><span class="commercial">OOPS</span> projections and automatic table substitution</h1>
+<h1>OOPS projections and automatic table substitution</h1>
 <div class="details">
 <span id="author" class="author">Alexey Bogdanov</span><br>
 </div>
 </div>
 <div id="content">
 <div class="paragraph">
-<p>The <span class="commercial">OOPS</span> provides some functions simplifying creation and usage of projections.</p>
+<p>The <span class="commercial">OOPS</span> provides some functions that simplify the creation and use of projections.</p>
 </div>
 <div class="paragraph">
-<p>In future it may be added to <span class="commercial">SQL</span> grammar, so that it is possible to write:</p>
+<p>In the future it may be added to the <span class="commercial">SQL</span> grammar, so that it is possible to write:</p>
 </div>
 <div class="listingblock">
 <div class="content">
@@ -458,7 +457,7 @@ body.book #toc,body.book #preamble,body.book h1.sect0,body.book .sect1>h2{page-b
 </div>
 </div>
 <div class="paragraph">
-<p>But right now it can be done using function:</p>
+<p>But for now it can be done using function:</p>
 </div>
 <hr>
 <div id="create_projection" class="openblock docstring">
@@ -478,7 +477,7 @@ body.book #toc,body.book #preamble,body.book h1.sect0,body.book .sect1>h2{page-b
 </div>
 </div>
 <div class="paragraph">
-<p>Creates projection of the given table.</p>
+<p>Creates a projection of the given table.</p>
 </div>
 <h3 id="_parameters" class="discrete">Parameters</h3>
 <div id="create_projection:projection_name" class="dlist">
@@ -522,50 +521,46 @@ body.book #toc,body.book #preamble,body.book h1.sect0,body.book .sect1>h2{page-b
 </dl>
 </div>
 <div class="paragraph">
-<p>The <code>create_projection(PNAME,...)</code> function does the following:</p>
+<p>The <code>create_projection(PNAME, ...)</code> function does the following:</p>
 </div>
 <div class="olist arabic">
 <ol class="arabic">
 <li>
-<p>Creates projection table with specified name and attributes.</p>
+<p>Creates a projection table with specified name and attributes.</p>
 </li>
 <li>
-<p>Creates <code>PNAME_refresh()</code> functions which can be used to update projection.</p>
+<p>Creates <code>PNAME_refresh()</code> functions that can be used to update the projection.</p>
 </li>
 <li>
-<p>Inserts information about created projection in <code>OOPS_projections</code> table.</p>
+<p>Inserts information about the created projection into <code>OOPS_projections</code> table.</p>
 </li>
 </ol>
 </div>
 <div class="paragraph">
-<p>This table is used by optimizer to automatically substitute table with projection.</p>
-</div>
-<div class="paragraph">
-<p>Test: <a href="#order_by">[order_by]</a></p>
+<p>This table is used by the optimizer to automatically substitute table with projection.</p>
 </div>
 <hr>
 </div>
 </div>
 <div class="paragraph">
 <p>The <code><a href="#create_projection:order_by">[create_projection:order_by]</a></code> attribute is one of the OOPS projection vector columns by which data is sorted.
-Presence of such column in projection allows to incrementally update projection.
-Generated <code>PNAME_refresh()</code> method calls <code>populate()</code> method, selecting from original table only rows with <code>order_by</code> column value greater than maximal value of this column
-in projection.
-It assumes that <code>order_by</code> is unique or at least refresh is done at the moment when there is some gap in collected events.</p>
+The presence of such a column in the projection allows the projection to be updated incrementally.
+The generated <code>PNAME_refresh()</code> method calls the <code>populate()</code> method, selecting only rows from the original table where the <code>order_by</code> column value is greater than the maximum value of that column in the projection.
+It assumes that <code>order_by</code> is unique or at least that the refresh is done at the moment when there is a gap in the collected events.</p>
 </div>
 <div class="paragraph">
 <p>Like materialized views, <span class="commercial">OOPS</span> projections are not updated automatically.
-It is responsibility of a programmer to periodically refresh them.
-The most convenient way is to use generated <code>PNAME_refresh()</code> function.
-If <code><a href="#create_projection:order_by">[create_projection:order_by]</a></code> attribute is specified, this function imports from original table only the new data (not present in projection).</p>
+It is the programmer&#8217;s responsibility to update them periodically.
+The most convenient way is to use the generated <code>PNAME_refresh()</code> function.
+If the <code><a href="#create_projection:order_by">[create_projection:order_by]</a></code> attribute is specified, this function will import only the new data (not present in the projection) from the original table.</p>
 </div>
 <div class="paragraph">
 <p>The main advantage of <span class="commercial">OOPS</span> projection mechanism is that it allows to automatically substitute queries on original tables with projections.
-There is <code>OOPS.auto_substitute_projections</code> configuration parameter which allows to switch on such substitution.
-By default it is switched off, because OOPS projections may be not synchronized with original table and query on projection may return different result.</p>
+There is a configuration parameter <code>OOPS.auto_substitute_projections</code> that allows to enable such substitution.
+By default it is disabled, because <span class="commercial">OOPS</span> projections may not be synchronized with the original table and a query on a projection may return different result.</p>
 </div>
 <div class="paragraph">
-<p>Right now projections can be automatically substituted only if:</p>
+<p>Currently, projections can only be substituted automatically if:</p>
 </div>
 <div class="olist arabic">
 <ol class="arabic">
@@ -576,8 +571,7 @@ By default it is switched off, because OOPS projections may be not synchronized 
 <p>Query performs aggregation of vector (tile) columns.</p>
 </li>
 <li>
-<p>All other expressions in target list, <code>ORDER BY</code> / <code>GROUP BY</code>
-clauses refer only to scalar attributes of projection.</p>
+<p>All other expressions in the target list, <code>ORDER BY</code> / <code>GROUP BY</code> clauses refer only to scalar attributes of the projection.</p>
 </li>
 </ol>
 </div>
@@ -615,16 +609,16 @@ create_projection(
     array['l_shipdate','l_quantity','l_extendedprice','l_discount','l_tax'],
     array['l_returnflag','l_linestatus']);
 
--- Switching on timing to see the difference
+-- Enable timing to see the difference
 \timing
 
--- Copying demo table
+-- Copy demo table
 copy lineitem from '/mnt/data/lineitem.tbl' delimiter '|' csv;
 
--- Refreshing the projections
+-- Refresh the projections
 select OOPS_lineitem_refresh();
 
--- First let's make a query without OOPS substitution
+-- First let's run a query without OOPS substitution
 select
     l_returnflag,
     l_linestatus,
@@ -657,7 +651,7 @@ order by
 </div>
 <div class="listingblock">
 <div class="content">
-<pre class="highlightjs highlight"><code class="language-sql hljs" data-lang="sql">-- Now let's make the same query but with OOPS substitution set to ON
+<pre class="highlightjs highlight"><code class="language-sql hljs" data-lang="sql">-- Now let's run the same query but with OOPS substitution set to ON
 set OOPS.auto_substitute_projections TO on;
 
 select
@@ -702,7 +696,7 @@ order by
 </div>
 <div id="footer">
 <div id="footer-text">
-Last updated 2025-04-26 18:02:46 +0200
+Last updated 2025-04-26 18:49:07 +0200
 </div>
 </div>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/9.18.3/highlight.min.js"></script>
