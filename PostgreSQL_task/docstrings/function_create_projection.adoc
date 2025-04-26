@@ -27,6 +27,9 @@ Creates a projection of the given table.
 [discrete]
 === Parameters
 
+// Параметры описываем через единый шаблон
+// Для каждого параметра задаем его свойства
+
 :parameter_name: projection_name
 :parameter_value: text
 :parameter_is_optional:
@@ -45,12 +48,12 @@ include::../templates/parameter_definition.adoc[]
 :parameter_description: Array of column names which should be stores as [.commercial]#OOPS# tiles
 include::../templates/parameter_definition.adoc[]
 
+// Судя по наличию default параметр scalar_columns тоже опциональный? Тогда нужно будет добавить здесь optional
 :parameter_name: scalar_columns
 :parameter_value: text[]
 :parameter_is_optional:
 :parameter_description: Array of grouping columns which type is preserved
 include::../templates/parameter_definition.adoc[]
-// Судя по наличию default параметр scalar_columns тоже опциональный? Тогда нужно будет добавить здесь optional
 
 :parameter_name: order_by
 :parameter_value: text
@@ -70,4 +73,3 @@ The `+create_projection(PNAME, ...)+` function does the following:
 This table is used by the optimizer to automatically substitute table with projection.
 
 include::../templates/docstring_close.adoc[]
-
