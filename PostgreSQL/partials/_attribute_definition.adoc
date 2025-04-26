@@ -1,2 +1,0 @@
-[id={attribute_name}]
-`{attribute_name}` `::{attribute_value}` {attribute_is_optional}:: pass:attributes,quotes[{attribute_description}]

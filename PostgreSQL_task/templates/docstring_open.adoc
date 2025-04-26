@@ -1,4 +1,4 @@
-// tag::{object_name}[]
+// Шаблон шапки докстринга
 '''
 [id={object_name},role=docstring]
 --

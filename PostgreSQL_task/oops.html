@@ -4,7 +4,10 @@
 <meta charset="UTF-8">
 <meta http-equiv="X-UA-Compatible" content="IE=edge">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<meta name="generator" content="Asciidoctor 2.0.22">
+<meta name="generator" content="Asciidoctor 2.0.23">
+<meta name="description" content="This article describes the usage of OOPS projections">
+<meta name="keywords" content="OOPS, projection, vector">
+<meta name="author" content="Alexey Bogdanov">
 <title>OOPS projections and automatic table substitution</title>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Open+Sans:300,300italic,400,400italic,600,600italic%7CNoto+Serif:400,400italic,700,700italic%7CDroid+Sans+Mono:400,700">
 <style>
@@ -433,19 +436,25 @@ body.book #toc,body.book #preamble,body.book h1.sect0,body.book .sect1>h2{page-b
 #footer-text{color:rgba(0,0,0,.6);font-size:.9em}}
 @media amzn-kf8{#header,#content,#footnotes,#footer{padding:0}}
 </style>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/9.18.3/styles/paraiso-light.min.css">
 </head>
 <body class="article">
 <div id="header">
-<h1><span class="tech">OOPS</span> projections and automatic table substitution</h1>
+<h1><span class="commercial">OOPS</span> projections and automatic table substitution</h1>
+<div class="details">
+<span id="author" class="author">Alexey Bogdanov</span><br>
+</div>
 </div>
 <div id="content">
 <div class="paragraph">
-<p>The <span class="tech">OOPS</span> provides some functions simplifying creation and usage of projections.
-In future it may be added to SQL grammar, so that it is possible to write:</p>
+<p>The <span class="commercial">OOPS</span> provides some functions simplifying creation and usage of projections.</p>
+</div>
+<div class="paragraph">
+<p>In future it may be added to <span class="commercial">SQL</span> grammar, so that it is possible to write:</p>
 </div>
 <div class="listingblock">
 <div class="content">
-<pre class="highlight"><code class="language-sql" data-lang="sql">CREATE PROJECTION xxx OF TABLE yyy(column1, column2,...) GROUP BY (column1, column2, ...)</code></pre>
+<pre class="highlightjs highlight"><code class="language-sql hljs" data-lang="sql">CREATE PROJECTION xxx OF TABLE yyy(column1, column2, ...) GROUP BY (column1, column2, ...)</code></pre>
 </div>
 </div>
 <div class="paragraph">
@@ -460,7 +469,7 @@ In future it may be added to SQL grammar, so that it is possible to write:</p>
 </div>
 <div class="listingblock">
 <div class="content">
-<pre class="highlight"><code class="language-postgres" data-lang="postgres">create_projection(
+<pre class="highlightjs highlight"><code class="language-sql hljs" data-lang="sql">create_projection(
     projection_name text,
     source_table regclass,
     vector_columns text[],
@@ -468,31 +477,35 @@ In future it may be added to SQL grammar, so that it is possible to write:</p>
     order_by text default null)</code></pre>
 </div>
 </div>
-<div id="projection_name" class="dlist">
+<div class="paragraph">
+<p>Creates projection of the given table.</p>
+</div>
+<h3 id="_parameters" class="discrete">Parameters</h3>
+<div id="create_projection:projection_name" class="dlist">
 <dl>
 <dt class="hdlist1"><code>projection_name</code> <code>::text</code> </dt>
 <dd>
-<p>Name of the projection (<code>PNAME</code> below)</p>
+<p>Name of the projection (<code>PNAME</code>)</p>
 </dd>
 </dl>
 </div>
-<div id="source_table" class="dlist">
+<div id="create_projection:source_table" class="dlist">
 <dl>
 <dt class="hdlist1"><code>source_table</code> <code>::regclass</code> </dt>
 <dd>
-<p>Existing <span class="tech">Postgres</span> table to be substituted by projection</p>
+<p>Existing <span class="commercial">Postgres</span> table to be substituted by projection</p>
 </dd>
 </dl>
 </div>
-<div id="vector_columns" class="dlist">
+<div id="create_projection:vector_columns" class="dlist">
 <dl>
 <dt class="hdlist1"><code>vector_columns</code> <code>::text[]</code> </dt>
 <dd>
-<p>Array of column names which should be stores as <span class="tech">OOPS</span> tiles</p>
+<p>Array of column names which should be stores as <span class="commercial">OOPS</span> tiles</p>
 </dd>
 </dl>
 </div>
-<div id="scalar_columns" class="dlist">
+<div id="create_projection:scalar_columns" class="dlist">
 <dl>
 <dt class="hdlist1"><code>scalar_columns</code> <code>::text[]</code> </dt>
 <dd>
@@ -500,7 +513,7 @@ In future it may be added to SQL grammar, so that it is possible to write:</p>
 </dd>
 </dl>
 </div>
-<div id="order_by" class="dlist">
+<div id="create_projection:order_by" class="dlist">
 <dl>
 <dt class="hdlist1"><code>order_by</code> <code>::text</code> optional</dt>
 <dd>
@@ -527,26 +540,29 @@ In future it may be added to SQL grammar, so that it is possible to write:</p>
 <div class="paragraph">
 <p>This table is used by optimizer to automatically substitute table with projection.</p>
 </div>
+<div class="paragraph">
+<p>Test: <a href="#order_by">[order_by]</a></p>
+</div>
 <hr>
 </div>
 </div>
 <div class="paragraph">
-<p>The <code><a href="#order_by">[order_by]</a></code> attribute is one of the OOPS projection vector columns by which data is sorted.
+<p>The <code><a href="#create_projection:order_by">[create_projection:order_by]</a></code> attribute is one of the OOPS projection vector columns by which data is sorted.
 Presence of such column in projection allows to incrementally update projection.
-Generated <code>PNAME_refresh()</code> method calls <code>populate()</code> method, selecting from original table only rows with <code><a href="#order_by">[order_by]</a></code> column value greater than maximal value of this column
+Generated <code>PNAME_refresh()</code> method calls <code>populate()</code> method, selecting from original table only rows with <code>order_by</code> column value greater than maximal value of this column
 in projection.
-It assumes that <code><a href="#order_by">[order_by]</a></code> is unique or at least refresh is done at the moment when there is some gap in collected events.</p>
+It assumes that <code>order_by</code> is unique or at least refresh is done at the moment when there is some gap in collected events.</p>
 </div>
 <div class="paragraph">
-<p>Like materialized views, <span class="tech">OOPS</span> projections are not updated automatically.
+<p>Like materialized views, <span class="commercial">OOPS</span> projections are not updated automatically.
 It is responsibility of a programmer to periodically refresh them.
 The most convenient way is to use generated <code>PNAME_refresh()</code> function.
-If <code><a href="#order_by">[order_by]</a></code> attribute is specified, this function imports from original table only the new data (not present in projection).</p>
+If <code><a href="#create_projection:order_by">[create_projection:order_by]</a></code> attribute is specified, this function imports from original table only the new data (not present in projection).</p>
 </div>
 <div class="paragraph">
-<p>The main advantage of <span class="tech">OOPS</span> projection mechanism is that it allows to automatically substitute queries on original tables with projections.
+<p>The main advantage of <span class="commercial">OOPS</span> projection mechanism is that it allows to automatically substitute queries on original tables with projections.
 There is <code>OOPS.auto_substitute_projections</code> configuration parameter which allows to switch on such substitution.
-By default it is switched off, because OOPS projects may be not synchronized with original table and query on projection may return different result.</p>
+By default it is switched off, because OOPS projections may be not synchronized with original table and query on projection may return different result.</p>
 </div>
 <div class="paragraph">
 <p>Right now projections can be automatically substituted only if:</p>
@@ -570,7 +586,7 @@ clauses refer only to scalar attributes of projection.</p>
 </div>
 <div class="listingblock">
 <div class="content">
-<pre class="highlight"><code class="language-postgres" data-lang="postgres">create extension OOPS;
+<pre class="highlightjs highlight"><code class="language-sql hljs" data-lang="sql">create extension OOPS;
 
 -- Let's create a demo table
 create table lineitem(
@@ -632,12 +648,6 @@ order by
     l_linestatus;</code></pre>
 </div>
 </div>
-<style>
-.output {
-  background-color: lightgrey;
-  font-family: "Noto Sans Mono", monospace;
-}
-</style>
 <div class="openblock output">
 <div class="content">
 <div class="paragraph">
@@ -647,7 +657,7 @@ order by
 </div>
 <div class="listingblock">
 <div class="content">
-<pre class="highlight"><code class="language-postgres" data-lang="postgres">-- Now let's make the same query but with OOPS substitution set to ON
+<pre class="highlightjs highlight"><code class="language-sql hljs" data-lang="sql">-- Now let's make the same query but with OOPS substitution set to ON
 set OOPS.auto_substitute_projections TO on;
 
 select
@@ -680,11 +690,27 @@ order by
 </div>
 </div>
 </div>
+<style>
+.output {
+  background-color: lightgrey;
+  font-family: "Noto Sans Mono", monospace;
+}
+.commercial {
+  font-weight: bold;
+}
+</style>
 </div>
 <div id="footer">
 <div id="footer-text">
-Last updated 2025-04-25 23:45:32 +0200
+Last updated 2025-04-26 18:02:46 +0200
 </div>
 </div>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/9.18.3/highlight.min.js"></script>
+<script>
+if (!hljs.initHighlighting.called) {
+  hljs.initHighlighting.called = true
+  ;[].slice.call(document.querySelectorAll('pre.highlight > code[data-lang]')).forEach(function (el) { hljs.highlightBlock(el) })
+}
+</script>
 </body>
 </html>

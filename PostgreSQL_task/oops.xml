@@ -1,0 +1,208 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<?asciidoc-toc?>
+<?asciidoc-numbered?>
+<article xmlns="http://docbook.org/ns/docbook" xmlns:xl="http://www.w3.org/1999/xlink" version="5.0" xml:lang="en">
+<info>
+<title><phrase role="commercial">OOPS</phrase> projections and automatic table substitution</title>
+<date>2025-04-26</date>
+<author>
+<personname>
+<firstname>Alexey</firstname>
+<surname>Bogdanov</surname>
+</personname>
+</author>
+<authorinitials>AB</authorinitials>
+</info>
+<simpara>The <phrase role="commercial">OOPS</phrase> provides some functions simplifying creation and usage of projections.</simpara>
+<simpara>In future it may be added to <phrase role="commercial">SQL</phrase> grammar, so that it is possible to write:</simpara>
+<programlisting language="sql" linenumbering="unnumbered">CREATE PROJECTION xxx OF TABLE yyy(column1, column2, ...) GROUP BY (column1, column2, ...)</programlisting>
+<simpara>But right now it can be done using function:</simpara>
+<simpara><?asciidoc-hr?></simpara>
+<para xml:id="create_projection" role="docstring">
+<simpara><link linkend="create_projection">#</link>
+<emphasis role="strong"><literal>create_projection</literal></emphasis> — <emphasis>Function</emphasis></simpara>
+<programlisting language="sql" linenumbering="unnumbered">create_projection(
+    projection_name text,
+    source_table regclass,
+    vector_columns text[],
+    scalar_columns text[] default null,
+    order_by text default null)</programlisting>
+<simpara>Creates projection of the given table.</simpara>
+<bridgehead xml:id="_parameters" renderas="sect2">Parameters</bridgehead>
+<variablelist xml:id="create_projection:projection_name">
+<varlistentry>
+<term><literal>projection_name</literal> <literal>::text</literal> </term>
+<listitem>
+<simpara>Name of the projection (<literal>PNAME</literal>)</simpara>
+</listitem>
+</varlistentry>
+</variablelist>
+<variablelist xml:id="create_projection:source_table">
+<varlistentry>
+<term><literal>source_table</literal> <literal>::regclass</literal> </term>
+<listitem>
+<simpara>Existing <phrase role="commercial">Postgres</phrase> table to be substituted by projection</simpara>
+</listitem>
+</varlistentry>
+</variablelist>
+<variablelist xml:id="create_projection:vector_columns">
+<varlistentry>
+<term><literal>vector_columns</literal> <literal>::text[]</literal> </term>
+<listitem>
+<simpara>Array of column names which should be stores as <phrase role="commercial">OOPS</phrase> tiles</simpara>
+</listitem>
+</varlistentry>
+</variablelist>
+<variablelist xml:id="create_projection:scalar_columns">
+<varlistentry>
+<term><literal>scalar_columns</literal> <literal>::text[]</literal> </term>
+<listitem>
+<simpara>Array of grouping columns which type is preserved</simpara>
+</listitem>
+</varlistentry>
+</variablelist>
+<variablelist xml:id="create_projection:order_by">
+<varlistentry>
+<term><literal>order_by</literal> <literal>::text</literal> optional</term>
+<listitem>
+<simpara>Name of ordering attribute</simpara>
+</listitem>
+</varlistentry>
+</variablelist>
+<simpara>The <literal>create_projection(PNAME, ...)</literal> function does the following:</simpara>
+<orderedlist numeration="arabic">
+<listitem>
+<simpara>Creates projection table with specified name and attributes.</simpara>
+</listitem>
+<listitem>
+<simpara>Creates <literal>PNAME_refresh()</literal> functions which can be used to update projection.</simpara>
+</listitem>
+<listitem>
+<simpara>Inserts information about created projection in <literal>OOPS_projections</literal> table.</simpara>
+</listitem>
+</orderedlist>
+<simpara>This table is used by optimizer to automatically substitute table with projection.</simpara>
+<simpara><?asciidoc-hr?></simpara>
+</para>
+<simpara>The <literal><xref linkend="create_projection:order_by"/></literal> attribute is one of the OOPS projection vector columns by which data is sorted.
+Presence of such column in projection allows to incrementally update projection.
+Generated <literal>PNAME_refresh()</literal> method calls <literal>populate()</literal> method, selecting from original table only rows with <literal>order_by</literal> column value greater than maximal value of this column
+in projection.
+It assumes that <literal>order_by</literal> is unique or at least refresh is done at the moment when there is some gap in collected events.</simpara>
+<simpara>Like materialized views, <phrase role="commercial">OOPS</phrase> projections are not updated automatically.
+It is responsibility of a programmer to periodically refresh them.
+The most convenient way is to use generated <literal>PNAME_refresh()</literal> function.
+If <literal><xref linkend="create_projection:order_by"/></literal> attribute is specified, this function imports from original table only the new data (not present in projection).</simpara>
+<simpara>The main advantage of <phrase role="commercial">OOPS</phrase> projection mechanism is that it allows to automatically substitute queries on original tables with projections.
+There is <literal>OOPS.auto_substitute_projections</literal> configuration parameter which allows to switch on such substitution.
+By default it is switched off, because OOPS projections may be not synchronized with original table and query on projection may return different result.</simpara>
+<simpara>Right now projections can be automatically substituted only if:</simpara>
+<orderedlist numeration="arabic">
+<listitem>
+<simpara>Query doesn’t contain JOINs.</simpara>
+</listitem>
+<listitem>
+<simpara>Query performs aggregation of vector (tile) columns.</simpara>
+</listitem>
+<listitem>
+<simpara>All other expressions in target list, <literal>ORDER BY</literal> / <literal>GROUP BY</literal>
+clauses refer only to scalar attributes of projection.</simpara>
+</listitem>
+</orderedlist>
+<simpara>Example of using projections:</simpara>
+<programlisting language="sql" linenumbering="unnumbered">create extension OOPS;
+
+-- Let's create a demo table
+create table lineitem(
+    l_orderkey integer,
+    l_partkey integer,
+    l_suppkey integer,
+    l_linenumber integer,
+    l_quantity real,
+    l_extendedprice real,
+    l_discount real,
+    l_tax real,
+    l_returnflag "char",
+    l_linestatus "char",
+    l_shipdate date,
+    l_commitdate date,
+    l_receiptdate date,
+    l_shipinstruct char(25),
+    l_shipmode char(10),
+    l_comment char(44),
+    l_dummy char(1));
+
+select
+create_projection(
+    'OOPS_lineitem',
+    'lineitem',
+    array['l_shipdate','l_quantity','l_extendedprice','l_discount','l_tax'],
+    array['l_returnflag','l_linestatus']);
+
+-- Switching on timing to see the difference
+\timing
+
+-- Copying demo table
+copy lineitem from '/mnt/data/lineitem.tbl' delimiter '|' csv;
+
+-- Refreshing the projections
+select OOPS_lineitem_refresh();
+
+-- First let's make a query without OOPS substitution
+select
+    l_returnflag,
+    l_linestatus,
+    sum(l_quantity) as sum_qty,
+    sum(l_extendedprice) as sum_base_price,
+    sum(l_extendedprice*(1-l_discount)) as sum_disc_price,
+    sum(l_extendedprice*(1-l_discount)*(1+l_tax)) as sum_charge,
+    avg(l_quantity) as avg_qty,
+    avg(l_extendedprice) as avg_price,
+    avg(l_discount) as avg_disc,
+    count(*) as count_order
+from
+    lineitem
+where
+    l_shipdate &lt;= '1998-12-01'
+group by
+    l_returnflag,
+    l_linestatus
+order by
+    l_returnflag,
+    l_linestatus;</programlisting>
+<simpara>output from previous code block</simpara>
+<programlisting language="sql" linenumbering="unnumbered">-- Now let's make the same query but with OOPS substitution set to ON
+set OOPS.auto_substitute_projections TO on;
+
+select
+    l_returnflag,
+    l_linestatus,
+    sum(l_quantity) as sum_qty,
+    sum(l_extendedprice) as sum_base_price,
+    sum(l_extendedprice*(1-l_discount)) as sum_disc_price,
+    sum(l_extendedprice*(1-l_discount)*(1+l_tax)) as sum_charge,
+    avg(l_quantity) as avg_qty,
+    avg(l_extendedprice) as avg_price,
+    avg(l_discount) as avg_disc,
+    count(*) as count_order
+from
+    lineitem
+where
+    l_shipdate &lt;= '1998-12-01'
+group by
+    l_returnflag,
+    l_linestatus
+order by
+    l_returnflag,
+    l_linestatus;</programlisting>
+<simpara>output from previous code block</simpara>
+<style>
+.output {
+  background-color: lightgrey;
+  font-family: "Noto Sans Mono", monospace;
+}
+.commercial {
+  font-weight: bold;
+}
+</style>
+</article>

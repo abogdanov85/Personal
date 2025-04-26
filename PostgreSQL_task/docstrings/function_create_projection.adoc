@@ -1,0 +1,73 @@
+// Описание функции create_projection
+
+:object_name: create_projection
+:object_type: Function
+
+include::../templates/docstring_open.adoc[]
+
+//[source,postgres]
+[source,sql]
+----
+create_projection(
+    projection_name text,
+    source_table regclass,
+    vector_columns text[],
+    scalar_columns text[] default null,
+    order_by text default null)
+----
+
+// Краткое описание заворачиваем в тэг, чтобы его можно было использовать в других местах, 
+// например в сниппетах в результатах поиска
+// tag::short-description[]
+Creates projection of the given table.
+// end::short-description[]
+
+// Заголовок, не входящий в структуру документа, 
+// так как этот докстринг может быть использован на разных страницах в разных местах
+[discrete]
+=== Parameters
+
+:parameter_name: projection_name
+:parameter_value: text
+:parameter_is_optional:
+:parameter_description: Name of the projection (`PNAME`)
+include::../templates/parameter_definition.adoc[]
+
+:parameter_name: source_table
+:parameter_value: regclass
+:parameter_is_optional:
+:parameter_description: Existing [.commercial]#Postgres# table to be substituted by projection
+include::../templates/parameter_definition.adoc[]
+
+:parameter_name: vector_columns
+:parameter_value: text[]
+:parameter_is_optional:
+:parameter_description: Array of column names which should be stores as [.commercial]#OOPS# tiles
+include::../templates/parameter_definition.adoc[]
+
+:parameter_name: scalar_columns
+:parameter_value: text[]
+:parameter_is_optional:
+:parameter_description: Array of grouping columns which type is preserved
+include::../templates/parameter_definition.adoc[]
+// Судя по наличию default параметр scalar_columns тоже опциональный? Тогда нужно будет добавить здесь optional
+
+:parameter_name: order_by
+:parameter_value: text
+:parameter_is_optional: optional
+:parameter_description: Name of ordering attribute
+include::../templates/parameter_definition.adoc[]
+
+The `+create_projection(PNAME, ...)+` function does the following:
+
+[arabic]
+. Creates projection table with specified name and attributes.
+// Здесь и далее нужна будет ссылка на описание (докстринг) PNAME_refresh()
+. Creates `+PNAME_refresh()+` functions which can be used to update projection.
+// Здесь нужна будет ссылка на описание (докстринг) OOPS_projections
+. Inserts information about created projection in `+OOPS_projections+` table.
+
+This table is used by optimizer to automatically substitute table with projection.
+
+include::../templates/docstring_close.adoc[]
+
