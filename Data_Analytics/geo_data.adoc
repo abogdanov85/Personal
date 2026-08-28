@@ -1,0 +1,1531 @@
+= Analysing geodata from sports trackers
+include::partial$dict.adoc[]
+
+In this example we will show how {Tengri} can be used to analyse geodata from sports trackers such as https://connect.garmin.com/[Garmin,window=_blank], https://www.strava.com/[Strava,window=_blank] and others.
+
+The most popular formats for recording and storing geodata in sports trackers are `https://www.topografix.com/gpx.asp[.gpx,window=_blank]` and `https://developer.garmin.com/fit/overview/[.fit,window=_blank]`. In addition to GPS-coordinates of points (longitude, latitude, altitude), these formats also store the time the athlete travelled to a given point and other information about the athlete and his equipment (heart rate, power, pedal speed, speed, temperature, etc.).
+
+As a dataset for this example we will take an upload of the archive of all data from one https://www.strava.com/athletes/6250492[Strava profile,window=_blank] as of 9 September 2025. To learn how to do such an upload, see https://support.strava.com/hc/en-us/articles/216918437-Exporting-your-Data-and-Bulk-Export[here,window=_blank].
+
+The Strava data upload is an archive containing, among other things, an `activities` folder with all activities of a given user in the form of `.gpx` or `.fit` files (depending on the devices used for track recording) and an `activities.csv` file, which contains additional information from Strava service (activity name, activity type, comments, various calculated indicators, etc.).
+
+In total, there are 2190 activities (tracks) in our dataset, some of which are represented as `.gpx` files, and some as `.fit` files.
+
+[id=source_data_upload]
+== Uploading source data
+
+Import the required modules {Python}:
+
+[source,Python]
+----
+import os
+import zipfile
+import tngri
+import pandas as pd
+import gzip
+import shutil
+import datetime
+import requests
+import s3fs
+import gpxpy
+import fitdecode
+import tilemapbase
+----
+
+[source,output,role=output]
+----
+done at 2025-11-20 12:10:15.969104
+----
+
+First, let's download https://drive.google.com/file/d/1yFycFAGv00WPPGvr65pCRSeHDJM9wol6/view?usp=drive_link[data,window=_blank]. To do this, let's use the download wizard and select the zip file on the local computer with track files. The result of the download wizard will be the path to the downloaded file of the form: `"prostore/Stage/abogdanov/0f89889ad699_all_activities.zip"`. We use this path to read the downloaded file in the {Python} cell via the `s3fs` module:
+
+[source,Python]
+----
+start = datetime.datetime.now()
+temp_dir = 'temp'
+
+# Чистим временную папку (чтобы при каждом запуске данные заливались с нуля)
+if os.path.exists(temp_dir) and os.path.isdir(temp_dir):
+    shutil.rmtree(temp_dir)
+    print(f'Folder "{temp_dir}" cleaned')
+
+# Читаем файл zip, загруженный через мастер загрузки
+fs = s3fs.S3FileSystem()
+with fs.open("prostore/Stage/abogdanov/0f89889ad699_all_activities.zip", "rb") as f:
+    content = zipfile.ZipFile(f)
+
+    # Распаковываем zip
+    content.extractall(path=temp_dir)
+
+downloaded = len(os.listdir(temp_dir))
+print(f'Downloaded files total: {downloaded}')
+
+# Распаковываем .gz
+unpacked = 0
+for file in os.listdir(temp_dir):
+    file_path = os.path.join(temp_dir, file)
+    if file.endswith('.gz'):
+        unpacked += 1
+        with gzip.open(file_path, 'rb') as f_in:
+            with open(file_path[:-3], 'wb') as f_out:
+                shutil.copyfileobj(f_in, f_out)
+
+print(f'Unpaсked .gz files total: {unpacked}')
+print(f'Time from start: {str(datetime.datetime.now() - start)}')
+----
+
+[source,output,role=output]
+----
+Downloaded files total: 2190
+Unpaсked .gz files total: 1765
+Time from start: 0:00:03.692377
+----
+
+Now let's start parsing track files.
+
+1. Let's set column names in two tables to be created -- for all tracks and for all points from all tracks
+2. describe auxiliary functions
+3. Let's loop through all activity files and do parsing of data from them, and parsing will be different for `.gpx` and `.fit` files. For parsing we will use the handy modules {Python} `https://pypi.org/project/gpxpy[gpxpy,window=_blank]` and `https://pypi.org/project/fitdecode[fitdecode,window=_blank]`.
+4. Let's write the generated DataFrames into tables using the function `xref:ROOT:functions/tengri_functions.adoc#sql[tngri.sql]`
+
+[source,Python]
+----
+start = datetime.datetime.now()
+
+<1>
+# Колонки для таблицы треков
+tracks_dict = {
+    'track_id':[],
+    'track_name':[],
+    'track_length_km':[],
+    'track_first_coord_lat':[],
+    'track_first_coord_lon':[],
+    'country':[]
+    }
+# Колонки для таблицы точек
+points_dict = {
+    'track_id':[],
+    'latitude':[],
+    'longitude':[],
+    'elevation':[],
+    'heart_rate':[],
+    'temperature':[],
+    'cadence':[],
+    'power':[],
+    'time':[],
+    'speed':[]
+    }
+
+<2>
+# Получение extension из точки для .gpx
+def ext_from_point(point, type):
+    res = pd.NA
+    for ext in point.extensions:
+        ext_list = [el.text for el in ext if type in el.tag]
+        if len(ext_list) == 1:
+            res = ext_list[0]
+    return res
+
+# Получение мощности из точки для .gpx
+def power_from_point(point):
+    res = pd.NA
+    for ext in point.extensions:
+        if ext.tag == 'power':
+            res = ext.text
+    return res
+
+# Преобразование координат для .fit
+def convert_coord(coord):
+    if pd.isna(coord):
+        return coord
+    else:
+        return coord/((2**32)/360)
+
+# Преобразование скорости из м/с в км/ч
+def convert_speed(speed):
+    if pd.isna(speed):
+        return speed
+    else:
+        return speed*3.6
+
+# Определение страны по координатам
+def get_country(coords):
+    location = geolocator.reverse(f'{coords[0]}, {coords[1]}')
+    if not location is None:
+        return location.raw['address']['country']
+    else:
+        return 'Unknown'
+
+<3>
+# Начинаем парсинг gpx и fit
+files_done = 0
+for file in os.listdir(temp_dir):
+    file_path = os.path.join(temp_dir, file)
+    
+    if file.endswith('.gpx'):
+        files_done += 1
+        with open(file_path) as f:
+            gpx = gpxpy.parse(f)
+            if not len(gpx.tracks) == 1:
+                print(f'Not 1 track in file: {file_path}')
+            
+            cur_length_2d_km = gpx.tracks[0].segments[0].length_2d()/1000
+            track_first_lat = gpx.tracks[0].segments[0].points[0].latitude
+            track_first_lon = gpx.tracks[0].segments[0].points[0].longitude
+            
+            tracks_dict['track_first_coord_lat'].append(track_first_lat)
+            tracks_dict['track_first_coord_lon'].append(track_first_lon)
+            tracks_dict['track_id'].append(file)
+            tracks_dict['track_name'].append(gpx.tracks[0].name)
+            tracks_dict['track_length_km'].append(round(cur_length_2d_km, 2))
+            tracks_dict['country'].append(get_country((track_first_lat, track_first_lon)))
+            
+            for point in gpx.tracks[0].segments[0].points:
+                points_dict['track_id'].append(file)
+                points_dict['latitude'].append(point.latitude)
+                points_dict['longitude'].append(point.longitude)
+                points_dict['elevation'].append(point.elevation)
+                points_dict['heart_rate'].append(ext_from_point(point, 'hr'))
+                points_dict['temperature'].append(ext_from_point(point, 'atemp'))
+                points_dict['cadence'].append(ext_from_point(point, 'cad'))
+                points_dict['power'].append(power_from_point(point))
+                points_dict['time'].append(point.time)
+                # В gpx нету моментальной скорости
+                points_dict['speed'].append(pd.NA)
+
+    elif file.endswith('.fit'):
+        files_done += 1
+        track_first_lat = 0
+        track_first_lon = 0
+        with fitdecode.FitReader(file_path) as fit_file:
+            tracks_dict['track_id'].append(file)
+            tracks_dict['track_name'].append(pd.NA)
+            distance = 0
+            for frame in fit_file:
+                if not isinstance(frame, fitdecode.records.FitDataMessage):
+                    continue
+                if not frame.name == 'record':
+                    continue
+                if not (frame.has_field('position_lat') and frame.has_field('position_long')):
+                    continue
+                cur_lat = convert_coord(frame.get_value('position_lat', fallback=pd.NA))
+                cur_lon = convert_coord(frame.get_value('position_long', fallback=pd.NA))
+                
+                points_dict['track_id'].append(file)
+                points_dict['latitude'].append(cur_lat)
+                points_dict['longitude'].append(cur_lon)
+                points_dict['elevation'].append(frame.get_value('altitude', fallback=pd.NA))
+                #points_dict['heart_rate'].append(frame.get_value('heart_rate', fallback=pd.NA))
+                points_dict['heart_rate'].append(pd.NA)
+                points_dict['temperature'].append(frame.get_value('temperature', fallback=pd.NA))
+                #points_dict['cadence'].append(frame.get_value('cadence', fallback=pd.NA))
+                points_dict['cadence'].append(pd.NA)
+                points_dict['power'].append(frame.get_value('power', fallback=pd.NA))
+                points_dict['time'].append(frame.get_value('timestamp'))
+                points_dict['speed'].append(convert_speed(frame.get_value('enhanced_speed', fallback=pd.NA)))
+                
+                cur_dist = frame.get_value('distance', fallback=pd.NA)
+                if type(cur_dist) == float:
+                    distance = round((cur_dist/1000), 2)
+                if track_first_lat == 0 and not pd.isna(cur_lat):
+                    track_first_lat = cur_lat
+                if track_first_lon == 0 and not pd.isna(cur_lon):
+                    track_first_lon = cur_lon
+            tracks_dict['track_length_km'].append(distance)
+            tracks_dict['track_first_coord_lat'].append(track_first_lat)
+            tracks_dict['track_first_coord_lon'].append(track_first_lon)
+            tracks_dict['country'].append(get_country((track_first_lat, track_first_lon)))
+    
+    if files_done > 0 and files_done % 100 == 0 and file.endswith(('.fit', '.gpx')):
+        print(f'Files done: {files_done}/{downloaded} \
+        Points: {len(points_dict['track_id'])} \
+        Time from start: {str(datetime.datetime.now() - start)}')
+
+# Пишем собранные словари в DataFrame
+df_tracks = pd.DataFrame.from_dict(tracks_dict)
+df_points = pd.DataFrame.from_dict(points_dict)
+
+df_points['time_text'] = df_points['time'].astype(str)
+df_points = df_points.drop(columns=['time'])
+
+# Имена таблиц для записи
+table_names = ['demo_geo_tracks', 'demo_geo_points']
+
+<4>
+# Записываем сформированные DataFrame в таблицы
+for frame, table_name in zip([df_tracks, df_points], table_names):
+    print(f'Creating table: {table_name}')
+    print(f'Size: {frame.shape}')
+
+    file_name = tngri.upload_df(frame)
+    tngri.sql(f"CREATE OR REPLACE TABLE {table_name} AS SELECT * FROM read_parquet('{file_name}')")
+
+print(f'Finished. Time from start: {str(datetime.datetime.now() - start)}')
+----
+
+[source,output,role=output]
+----
+Files done: 100/2190 Points: 561928 Time from start: 0:01:57.949657
+Files done: 200/2190 Points: 1055973 Time from start: 0:03:48.225765
+Files done: 300/2190 Points: 1525239 Time from start: 0:05:38.334613
+Files done: 400/2190 Points: 2125124 Time from start: 0:07:28.989251
+Files done: 500/2190 Points: 2677727 Time from start: 0:09:25.163544
+Files done: 600/2190 Points: 3190749 Time from start: 0:11:12.439539
+Files done: 700/2190 Points: 3682379 Time from start: 0:13:02.326586
+Files done: 800/2190 Points: 4241999 Time from start: 0:14:49.970186
+Files done: 900/2190 Points: 4767488 Time from start: 0:16:37.493898
+Files done: 1000/2190 Points: 5252788 Time from start: 0:18:24.054901
+Files done: 1100/2190 Points: 5782689 Time from start: 0:20:14.398042
+Files done: 1200/2190 Points: 6333129 Time from start: 0:22:03.400943
+Files done: 1300/2190 Points: 6862458 Time from start: 0:23:51.433175
+Files done: 1400/2190 Points: 7413209 Time from start: 0:25:41.723606
+Files done: 1500/2190 Points: 7888312 Time from start: 0:27:28.314530
+Files done: 1600/2190 Points: 8469405 Time from start: 0:29:22.235098
+Files done: 1700/2190 Points: 8945913 Time from start: 0:31:10.916823
+Files done: 1800/2190 Points: 9444734 Time from start: 0:33:01.630686
+Files done: 1900/2190 Points: 9931590 Time from start: 0:34:49.403797
+Files done: 2000/2190 Points: 10481654 Time from start: 0:36:37.313329
+Files done: 2100/2190 Points: 11042971 Time from start: 0:38:29.835817
+Creating table: demo_geo_tracks
+Size: (2190, 6)
+Creating table: demo_geo_points
+Size: (11473061, 10)
+Finished. Time from start: 0:40:59.713264
+----
+
+Note that we record data in two tables, which are linked through track ID (activity file name). And for convenience of further work with data, in the track table we immediately record the coordinates of the first point of the track (columns `track_first_coord_lat` and `track_first_coord_lon`) and the country calculated from these coordinates.
+
+[NOTE]
+The execution of this cell takes about 40 minutes. But about half of that time is spent accessing the `https://pypi.org/project/geopy[geopy,window=_blank]` service to determine the country from the coordinates of the track start point. If there's a need to speed up the initial download. 
+it is useful to disable this service.
+
+== Checking downloaded data
+
+Check the track table:
+
+
+[source,SQL]
+----
+SELECT count(*) AS "Количество треков"
+    FROM demo_geo_tracks
+----
+
+[source,output,role=output]
+----
++-------------------+
+| Количество треков |
++-------------------+
+| 2190              |
++-------------------+
+----
+
+[source,SQL]
+----
+SELECT *
+    FROM demo_geo_tracks
+    LIMIT 10
+----
+
+[source,output,role=output]
+----
+Done in 8.2 sec.
+
++-----------------+------------+-----------------+-----------------------+-----------------------+---------------+--------------------+---------------------+
+| track_id        | track_name | track_length_km | track_first_coord_lat | track_first_coord_lon | country       | speed              | time_stamp          |
++-----------------+------------+-----------------+-----------------------+-----------------------+---------------+--------------------+---------------------+
+| 8205566762.fit  | null       | 51.04           | 52.47870256192982     | 13.336647050455213    | Deutschland   | 36.619200000000006 | 2020-06-26 13:44:05 |
++-----------------+------------+-----------------+-----------------------+-----------------------+---------------+--------------------+---------------------+
+| 5758691664.fit  | null       | 3.92            | 55.7587356492877      | 37.745437659323215    | Россия        | 36.781200000000005 | 2020-06-26 13:44:06 |
++-----------------+------------+-----------------+-----------------------+-----------------------+---------------+--------------------+---------------------+
+| 7562241822.fit  | null       | 21.69           | 36.594818104058504    | 30.56384850293398     | Türkiye       | 37.0512            | 2020-06-26 13:44:07 |
++-----------------+------------+-----------------+-----------------------+-----------------------+---------------+--------------------+---------------------+
+| 5752363946.fit  | null       | 62.85           | 55.764476750046015    | 37.71281814202666     | Россия        | 37.3068            | 2020-06-26 13:44:08 |
++-----------------+------------+-----------------+-----------------------+-----------------------+---------------+--------------------+---------------------+
+| 5774225138.fit  | null       | 114.24          | 55.99621960893273     | 36.27057650126517     | Россия        | 37.4652            | 2020-06-26 13:44:09 |
++-----------------+------------+-----------------+-----------------------+-----------------------+---------------+--------------------+---------------------+
+| 3602018438.fit  | null       | 34.76           | 55.76445009559393     | 37.712875390425324    | Россия        | 37.7856            | 2020-06-26 13:44:10 |
++-----------------+------------+-----------------+-----------------------+-----------------------+---------------+--------------------+---------------------+
+| 2665481253.fit  | null       | 43.88           | 57.06134635023773     | 23.311248868703842    | Latvija       | 37.980000000000004 | 2020-06-26 13:44:11 |
++-----------------+------------+-----------------+-----------------------+-----------------------+---------------+--------------------+---------------------+
+| 16185006845.fit | null       | 66.47           | 36.71585462987423     | -4.2837147787213326   | España        | 38.037600000000005 | 2020-06-26 13:44:12 |
++-----------------+------------+-----------------+-----------------------+-----------------------+---------------+--------------------+---------------------+
+| 5061483340.fit  | null       | 16.87           | 40.78166037797928     | -73.96295428276062    | United States | 38.037600000000005 | 2020-06-26 13:44:13 |
++-----------------+------------+-----------------+-----------------------+-----------------------+---------------+--------------------+---------------------+
+| 1842519266.fit  | null       | 71.94           | 55.73788298293948     | 37.65193585306406     | Россия        | 38.419200000000004 | 2020-06-26 13:44:14 |
++-----------------+------------+-----------------+-----------------------+-----------------------+---------------+--------------------+---------------------+
+----
+
+
+Checking the point table:
+
+[source,SQL]
+----
+SELECT count(*) AS "Количество точек"
+    FROM demo_geo_points 
+----
+
+[source,output,role=output]
+----
++------------------+
+| Количество точек |
++------------------+
+| 11473061         |
++------------------+
+----
+
+[source,SQL]
+----
+SELECT *
+    FROM demo_geo_points
+    LIMIT 10
+----
+
+[source,output,role=output]
+----
+Done in 8.3 sec.
+
++-----------------+--------------------+--------------------+-------------------+------------+-------------+---------+-------+--------------------+---------------------------+
+| track_id        | latitude           | longitude          | elevation         | heart_rate | temperature | cadence | power | speed              | time_text                 |
++-----------------+--------------------+--------------------+-------------------+------------+-------------+---------+-------+--------------------+---------------------------+
+| 11078368333.fit | 36.822746274992824 | -4.126659873872995 | 64.39999999999998 | null       | 18          | null    | 290   | 17.9784            | 2023-12-08 15:17:16+00:00 |
++-----------------+--------------------+--------------------+-------------------+------------+-------------+---------+-------+--------------------+---------------------------+
+| 11078368333.fit | 36.82279204018414  | -4.126656521111727 | 64.79999999999995 | null       | 18          | null    | 227   | 18.576             | 2023-12-08 15:17:17+00:00 |
++-----------------+--------------------+--------------------+-------------------+------------+-------------+---------+-------+--------------------+---------------------------+
+| 11078368333.fit | 36.822841661050916 | -4.126651743426919 | 65                | null       | 18          | null    | 148   | 18.4356            | 2023-12-08 15:17:18+00:00 |
++-----------------+--------------------+--------------------+-------------------+------------+-------------+---------+-------+--------------------+---------------------------+
+| 11078368333.fit | 36.82288742624223  | -4.126646546646953 | 65.20000000000005 | null       | 18          | null    | 204   | 18.511200000000002 | 2023-12-08 15:17:19+00:00 |
++-----------------+--------------------+--------------------+-------------------+------------+-------------+---------+-------+--------------------+---------------------------+
+| 11078368333.fit | 36.82293319143355  | -4.126641768962145 | 65.39999999999998 | null       | 18          | null    | 222   | 18.8244            | 2023-12-08 15:17:20+00:00 |
++-----------------+--------------------+--------------------+-------------------+------------+-------------+---------+-------+--------------------+---------------------------+
+| 11078368333.fit | 36.822978956624866 | -4.126635566353798 | 65.60000000000002 | null       | 18          | null    | 213   | 18.9216            | 2023-12-08 15:17:21+00:00 |
++-----------------+--------------------+--------------------+-------------------+------------+-------------+---------+-------+--------------------+---------------------------+
+| 11078368333.fit | 36.82302857749164  | -4.126623664051294 | 65.79999999999995 | null       | 18          | null    | 219   | 19.040399999999998 | 2023-12-08 15:17:22+00:00 |
++-----------------+--------------------+--------------------+-------------------+------------+-------------+---------+-------+--------------------+---------------------------+
+| 11078368333.fit | 36.823078114539385 | -4.126606900244951 | 66                | null       | 18          | null    | 223   | 19.1484            | 2023-12-08 15:17:23+00:00 |
++-----------------+--------------------+--------------------+-------------------+------------+-------------+---------+-------+--------------------+---------------------------+
+| 11078368333.fit | 36.82312773540616  | -4.126583598554134 | 66.20000000000005 | null       | 18          | null    | 223   | 19.332             | 2023-12-08 15:17:24+00:00 |
++-----------------+--------------------+--------------------+-------------------+------------+-------------+---------+-------+--------------------+---------------------------+
+| 11078368333.fit | 36.82317350059748  | -4.126557866111398 | 66.39999999999998 | null       | 18          | null    | 216   | 19.6452            | 2023-12-08 15:17:25+00:00 |
++-----------------+--------------------+--------------------+-------------------+------------+-------------+---------+-------+--------------------+---------------------------+
+----
+
+We see that the row counts in the track and point tables obtained via {SQL} queries match the data from the log of our first cell -- 2,190 tracks and 11,473,061 points.
+
+Now let's download the file `xref:{page-version}@ROOT:attachment$strava_activities.csv[strava_activities.csv]` via xref:scenarios/data_upload.adoc#wizard_upload[Download Wizard] and check the data in the table generated from it.
+
+[source,SQL]
+----
+CREATE OR REPLACE TABLE demo_geo_strava_activities AS
+    SELECT * 
+        FROM read_csv(
+            'abogdanov/5fe14b4c4110_strava_activities.csv'
+        );
+
+SELECT * 
+    FROM demo_geo_strava_activities
+    LIMIT 10
+    ORDER BY distance DESC;
+----
+
+[source,output,role=output]
+----
+Done in 9 sec.
+
++-------------+--------------------------+-----------------------------+---------------+------------------------------------------------------------------------------------+--------------+----------+----------------+-----------------+---------+-----------------------+----------------------+-------------------------------+----------------+-------------+----------------+-------------+------------+-----------+---------------+----------------+----------------+---------------+----------------+-----------+---------------+------------------------+------------------------+-------------+-----------------+------------------+--------------------+-----------+---------------+----------+-----------------+---------------------+-------------------+------------+----------------+-------------+---------------+------------+--------------------+------+------------+------------------------+-------------+---------------------------+---------------------------+-----------+---------------------+-------------+-------------------------+--------------------------+-------------------+---------------------+----------------------+----------+----------+------------------+------------+-----------+--------------+-------------------------+--------------+-------------+------------+----------+------+---------------------------+--------------------+-------------+--------------------+----------+---------------+------------+------------+--------------+---------+-----------------------+---------------+-------------------------+------------------------------+----------------+-------------+--------------+-------------+---------------+-----------+-----------------------------+------------+--------------+----------+----------+-------------+----------+-------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| activity id | activity date            | activity name               | activity type | activity description                                                               | elapsed time | distance | max heart rate | relative effort | commute | activity private note | activity gear        | filename                      | athlete weight | bike weight | elapsed time_1 | moving time | distance_1 | max speed | average speed | elevation gain | elevation loss | elevation low | elevation high | max grade | average grade | average positive grade | average negative grade | max cadence | average cadence | max heart rate_1 | average heart rate | max watts | average watts | calories | max temperature | average temperature | relative effort_1 | total work | number of runs | uphill time | downhill time | other time | perceived exertion | type | start time | weighted average power | power count | prefer perceived exertion | perceived relative effort | commute_1 | total weight lifted | from upload | grade adjusted distance | weather observation time | weather condition | weather temperature | apparent temperature | dewpoint | humidity | weather pressure | wind speed | wind gust | wind bearing | precipitation intensity | sunrise time | sunset time | moon phase | bike     | gear | precipitation probability | precipitation type | cloud cover | weather visibility | uv index | weather ozone | jump count | total grit | average flow | flagged | average elapsed speed | dirt distance | newly explored distance | newly explored dirt distance | activity count | total steps | carbon saved | pool length | training load | intensity | average grade adjusted pace | timer time | total cycles | recovery | with pet | competition | long run | for a cause | media                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
++-------------+--------------------------+-----------------------------+---------------+------------------------------------------------------------------------------------+--------------+----------+----------------+-----------------+---------+-----------------------+----------------------+-------------------------------+----------------+-------------+----------------+-------------+------------+-----------+---------------+----------------+----------------+---------------+----------------+-----------+---------------+------------------------+------------------------+-------------+-----------------+------------------+--------------------+-----------+---------------+----------+-----------------+---------------------+-------------------+------------+----------------+-------------+---------------+------------+--------------------+------+------------+------------------------+-------------+---------------------------+---------------------------+-----------+---------------------+-------------+-------------------------+--------------------------+-------------------+---------------------+----------------------+----------+----------+------------------+------------+-----------+--------------+-------------------------+--------------+-------------+------------+----------+------+---------------------------+--------------------+-------------+--------------------+----------+---------------+------------+------------+--------------+---------+-----------------------+---------------+-------------------------+------------------------------+----------------+-------------+--------------+-------------+---------------+-----------+-----------------------------+------------+--------------+----------+----------+-------------+----------+-------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| 8735873891  | Mar 18, 2023, 7:08:04 AM | La Primavera with RCC       | Ride          | null                                                                               | 31281        | 200.77   | 179            | 194             | false   | null                  | Giant TCR Advanced 1 | activities/9376119823.fit.gz  | null           | 8           | 31281          | 23034       | 200777.4   | 16.188    | 8.717         | 295            | 372            | 26.8          | 71.6           | 47.4      | 0             | null                   | null                   | 172         | 74              | null             | 131                | null      | 146           | 3248     | null            | 14                  | 194               | 3246159    | null           | null        | null          | null       | null               | null | null       | 176                    | 26231       | 0                         | null                      | 0         | null                | 1           | null                    | 1679122816               | 3                 | 7.5                 | 5.6                  | 4        | 0.78     | 1011.5           | 2.9        | 6.7       | 184          | 0                       | 1679116544   | 1679159808  | 0.89       | 4194513  | null | 0                         | null               | 1           | 16093              | 0        | 340.5         | null       | null       | null         | 0       | 6.419                 | 1138.9        | null                    | null                         | null           | null        | null         | null        | null          | null      | null                        | null       | null         | null     | null     | null        | null     | null        | media/4cda8a70-bd40-4e47-9f16-f8cce644e23d.jpg|media/5e549f56-1cc5-414e-b1f6-70923b28c261.jpg|media/aaefa66b-e6e3-425a-bf68-265c1d9f6355.mp4|media/bbf17907-6990-458b-8c41-ccba2dd463e4.jpg|media/d90e8b35-f65d-4649-8fcc-37214ba3b428.jpg|media/054f30b2-d198-4ecd-b520-2338c670d509.jpg                                                                                                                                                                                                                                            |
++-------------+--------------------------+-----------------------------+---------------+------------------------------------------------------------------------------------+--------------+----------+----------------+-----------------+---------+-----------------------+----------------------+-------------------------------+----------------+-------------+----------------+-------------+------------+-----------+---------------+----------------+----------------+---------------+----------------+-----------+---------------+------------------------+------------------------+-------------+-----------------+------------------+--------------------+-----------+---------------+----------+-----------------+---------------------+-------------------+------------+----------------+-------------+---------------+------------+--------------------+------+------------+------------------------+-------------+---------------------------+---------------------------+-----------+---------------------+-------------+-------------------------+--------------------------+-------------------+---------------------+----------------------+----------+----------+------------------+------------+-----------+--------------+-------------------------+--------------+-------------+------------+----------+------+---------------------------+--------------------+-------------+--------------------+----------+---------------+------------+------------+--------------+---------+-----------------------+---------------+-------------------------+------------------------------+----------------+-------------+--------------+-------------+---------------+-----------+-----------------------------+------------+--------------+----------+----------+-------------+----------+-------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| 2556833948  | Jul 23, 2019, 6:00:52 AM | Giro delle Dolomiti Stage 3 | Ride          | null                                                                               | 37818        | 180.47   | 177            | 184             | false   | null                  | Giant TCR Advanced 1 | activities/2713670395.fit.gz  | 83             | 8           | 37818          | 28854       | 180471     | 19.4      | null          | 3151           | 3175           | 225           | 2256           | 47.1      | 0             | null                   | null                   | 251         | 71              | 177              | 121                | null      | 149           | 5603     | null            | 29                  | 184               | null       | null           | null        | null          | null       | null               | null | null       | null                   | null        | null                      | null                      | null      | null                | null        | null                    | null                     | null              | null                | null                 | null     | null     | null             | null       | null      | null         | null                    | null         | null        | null       | 4194513  | null | null                      | null               | null        | null               | null     | null          | null       | null       | null         | null    | null                  | null          | null                    | null                         | null           | null        | null         | null        | null          | null      | null                        | null       | null         | null     | null     | null        | null     | null        | media/c21cda2a-7c14-47f7-a840-24c4cb412025.jpg|media/ae791d8b-e9a1-497c-9309-c49bbc318702.jpg                                                                                                                                                                                                                                                                                                                                                                                                                                        |
++-------------+--------------------------+-----------------------------+---------------+------------------------------------------------------------------------------------+--------------+----------+----------------+-----------------+---------+-----------------------+----------------------+-------------------------------+----------------+-------------+----------------+-------------+------------+-----------+---------------+----------------+----------------+---------------+----------------+-----------+---------------+------------------------+------------------------+-------------+-----------------+------------------+--------------------+-----------+---------------+----------+-----------------+---------------------+-------------------+------------+----------------+-------------+---------------+------------+--------------------+------+------------+------------------------+-------------+---------------------------+---------------------------+-----------+---------------------+-------------+-------------------------+--------------------------+-------------------+---------------------+----------------------+----------+----------+------------------+------------+-----------+--------------+-------------------------+--------------+-------------+------------+----------+------+---------------------------+--------------------+-------------+--------------------+----------+---------------+------------+------------+--------------+---------+-----------------------+---------------+-------------------------+------------------------------+----------------+-------------+--------------+-------------+---------------+-----------+-----------------------------+------------+--------------+----------+----------+-------------+----------+-------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| 4242331242  | Oct 25, 2020, 5:34:56 AM | Alanya Camp Day 6           | Ride          | Queen stage                                                                        | 33077        | 180.46   | 157            | 198             | false   | null                  | Giant TCR Advanced 1 | activities/4538350403.fit.gz  | null           | 8           | 33077          | 25687       | 180461.1   | 22.8      | 7.025         | 3110           | 3119           | 22            | 1060.4         | 33.3      | 0             | null                   | null                   | 108         | 73              | null             | 128                | null      | 190           | 4997     | null            | 27                  | 198               | null       | null           | null        | null          | null       | null               | null | null       | null                   | null        | 0                         | null                      | 0         | null                | 1           | null                    | 1603602048               | 1                 | 25.2                | 25.2                 | 6.6      | 0.3      | 1013.4           | 1.6        | 1.9       | 40           | 0                       | 1603598976   | 1603638272  | 0.32       | 4194513  | null | 0                         | null               | 0           | 16093              | 0        | 264.3         | null       | null       | null         | null    | null                  | null          | null                    | null                         | null           | null        | null         | null        | null          | null      | null                        | null       | null         | null     | null     | null        | null     | null        | media/574b5612-10c1-49b3-b3e1-bc97896153b0.jpg|media/1944d2ba-2e4a-4d15-b7ae-56ede81c8db2.jpg|media/363ad0a2-1fb7-4552-ae66-a53ec25e6bea.jpg|media/fc1cbf56-0bc7-4a26-88d1-c2558db2f934.jpg|media/d3a84a2d-0d73-4452-9be3-e53ff1d952f8.jpg|media/6013cbeb-193b-46ba-873d-5120c26a7535.jpg                                                                                                                                                                                                                                            |
++-------------+--------------------------+-----------------------------+---------------+------------------------------------------------------------------------------------+--------------+----------+----------------+-----------------+---------+-----------------------+----------------------+-------------------------------+----------------+-------------+----------------+-------------+------------+-----------+---------------+----------------+----------------+---------------+----------------+-----------+---------------+------------------------+------------------------+-------------+-----------------+------------------+--------------------+-----------+---------------+----------+-----------------+---------------------+-------------------+------------+----------------+-------------+---------------+------------+--------------------+------+------------+------------------------+-------------+---------------------------+---------------------------+-----------+---------------------+-------------+-------------------------+--------------------------+-------------------+---------------------+----------------------+----------+----------+------------------+------------+-----------+--------------+-------------------------+--------------+-------------+------------+----------+------+---------------------------+--------------------+-------------+--------------------+----------+---------------+------------+------------+--------------+---------+-----------------------+---------------+-------------------------+------------------------------+----------------+-------------+--------------+-------------+---------------+-----------+-----------------------------+------------+--------------+----------+----------+-------------+----------+-------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| 5109982540  | Apr 11, 2021, 7:09:45 AM | Desperados camp Day 8       | Ride          | Queen stage                                                                        | 33941        | 179.42   | 156            | 232             | false   | null                  | Giant TCR Advanced 1 | activities/5447314715.fit.gz  | null           | 8           | 33941          | 26284       | 179424.8   | 19.7      | 6.826         | 3192           | 3196           | -16           | 1030.8         | 27        | 0             | null                   | null                   | 107         | 73              | null             | 128                | null      | 184           | 5125     | null            | 17                  | 232               | null       | null           | null        | null          | null       | null               | null | null       | null                   | null        | 0                         | null                      | 0         | null                | 1           | null                    | 1618124416               | 1                 | 12.6                | 12.6                 | -1.3     | 0.38     | 1015.5           | 2.1        | 2.3       | 151          | 0                       | 1618111488   | 1618158208  | 0.99       | 4194513  | null | 0                         | null               | 0           | 16093              | 3        | 374.3         | null       | null       | null         | null    | null                  | null          | null                    | null                         | null           | null        | null         | null        | null          | null      | null                        | null       | null         | null     | null     | null        | null     | null        | media/7cab3cd2-33d2-4c90-a3a7-9fe1ab10717a.jpg|media/6ed80c53-4d61-4ed7-b86c-08f85e81ef3d.jpg|media/90ab131a-463e-412c-89c8-cbf489112f6a.jpg|media/90caba00-d1d4-4b58-80f5-672797383a42.jpg|media/4486c339-d16d-4c33-bac4-c790117bb62b.jpg|media/b633df5d-3cb5-42cd-9ce8-166382ab7d08.jpg|media/24da2f65-2a38-49e6-aaad-4e1637465eee.jpg|media/72c68f98-acbd-4ba8-9f3c-1841147ee3ec.jpg                                                                                                                                              |
++-------------+--------------------------+-----------------------------+---------------+------------------------------------------------------------------------------------+--------------+----------+----------------+-----------------+---------+-----------------------+----------------------+-------------------------------+----------------+-------------+----------------+-------------+------------+-----------+---------------+----------------+----------------+---------------+----------------+-----------+---------------+------------------------+------------------------+-------------+-----------------+------------------+--------------------+-----------+---------------+----------+-----------------+---------------------+-------------------+------------+----------------+-------------+---------------+------------+--------------------+------+------------+------------------------+-------------+---------------------------+---------------------------+-----------+---------------------+-------------+-------------------------+--------------------------+-------------------+---------------------+----------------------+----------+----------+------------------+------------+-----------+--------------+-------------------------+--------------+-------------+------------+----------+------+---------------------------+--------------------+-------------+--------------------+----------+---------------+------------+------------+--------------+---------+-----------------------+---------------+-------------------------+------------------------------+----------------+-------------+--------------+-------------+---------------+-----------+-----------------------------+------------+--------------+----------+----------+-------------+----------+-------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| 9196092834  | Jun 3, 2023, 8:53:43 AM  | To Chartres and back        | Ride          | Эпик соло                                                                          | 31048        | 178.89   | null           | null            | false   | null                  | Giant TCR Advanced 1 | activities/9866271692.fit.gz  | null           | 8           | 31048          | 24765       | 178891.4   | 16.196    | 7.224         | 1273           | 1269           | 60.8          | 179.8          | 35.1      | 0             | null                   | null                   | 158         | 77              | null             | null               | null      | 139           | 3394     | null            | 24                  | null              | 3393782    | null           | null        | null          | null       | null               | null | null       | 164                    | 27934       | 0                         | null                      | 0         | null                | 1           | null                    | 1685779200               | 1                 | 16.4                | 15.8                 | 9.8      | 0.65     | 1018.3           | 3.5        | 7.3       | 30           | 0                       | 1685764224   | 1685821696  | 0.5        | 4194513  | null | 0                         | 1                  | 0           | 27927.8            | 3        | null          | null       | null       | null         | 0       | 5.762                 | 162.6         | null                    | null                         | null           | null        | null         | null        | null          | null      | null                        | null       | null         | null     | null     | null        | null     | null        | media/6767f454-38a4-4e8f-9744-0224aa404404.jpg|media/9710109e-2167-4787-af1e-9bc0d48d8b37.jpg|media/f8bfef10-0af0-4f26-884d-2c39ba52e84b.jpg|media/734bba38-006a-46d8-8a3a-821a6664b02c.jpg|media/efe18288-537a-45af-9c8f-0753faee311b.jpg|media/44862277-2c3c-4076-a6c7-c0808d078bcb.jpg|media/7e33db5c-3484-4baf-bcaf-fe45b519cbef.jpg|media/ba09fc14-0114-4089-9d30-97a717a98f97.jpg|media/994a029a-6360-43a3-b2b1-f86bf4926cf0.jpg|media/197cd6db-63da-4dde-bd3b-f66ff65553c5.jpg|media/a69ff087-470a-43e1-aaf9-6514757a67f9.jpg |
++-------------+--------------------------+-----------------------------+---------------+------------------------------------------------------------------------------------+--------------+----------+----------------+-----------------+---------+-----------------------+----------------------+-------------------------------+----------------+-------------+----------------+-------------+------------+-----------+---------------+----------------+----------------+---------------+----------------+-----------+---------------+------------------------+------------------------+-------------+-----------------+------------------+--------------------+-----------+---------------+----------+-----------------+---------------------+-------------------+------------+----------------+-------------+---------------+------------+--------------------+------+------------+------------------------+-------------+---------------------------+---------------------------+-----------+---------------------+-------------+-------------------------+--------------------------+-------------------+---------------------+----------------------+----------+----------+------------------+------------+-----------+--------------+-------------------------+--------------+-------------+------------+----------+------+---------------------------+--------------------+-------------+--------------------+----------+---------------+------------+------------+--------------+---------+-----------------------+---------------+-------------------------+------------------------------+----------------+-------------+--------------+-------------+---------------+-----------+-----------------------------+------------+--------------+----------+----------+-------------+----------+-------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| 13705580758 | Feb 23, 2025, 8:14:47 AM | Morning Drop Ride           | Ride          | Was dropped on the way back and had to do 80km ITT                                 | 21668        | 168.59   | 180            | 424             | false   | null                  | Rose xlite 04        | activities/14626116429.fit.gz | null           | 7.8         | 21668          | 19470       | 168594.1   | 19.88     | 8.659         | 1288           | 1299           | 31.4          | 184.4          | 12.9      | 0             | null                   | null                   | 164         | 84              | 180              | 149                | null      | 193           | 3718     | null            | 18                  | 424               | 3711913    | null           | null        | null          | null       | null               | null | null       | 222                    | 20512       | 0                         | null                      | 0         | null                | 1           | null                    | 1740297600               | 1                 | 12.6                | 13.3                 | 7        | 0.69     | 1027             | 2.4        | 3.8       | 339          | 0                       | 1740293760   | 1740333952  | 0.875      | 13283968 | null | 0                         | 1                  | 0           | 34184              | 0        | null          | null       | null       | null         | 0       | 7.781                 | 0             | null                    | null                         | null           | null        | null         | null        | 293           | 72        | null                        | null       | null         | null     | null     | null        | null     | null        | media/ca9d74d0-33fc-4db2-bb39-2ffdaaf08d67.jpg|media/584a4f49-c9f9-4560-807d-72752f676e75.jpg                                                                                                                                                                                                                                                                                                                                                                                                                                        |
++-------------+--------------------------+-----------------------------+---------------+------------------------------------------------------------------------------------+--------------+----------+----------------+-----------------+---------+-----------------------+----------------------+-------------------------------+----------------+-------------+----------------+-------------+------------+-----------+---------------+----------------+----------------+---------------+----------------+-----------+---------------+------------------------+------------------------+-------------+-----------------+------------------+--------------------+-----------+---------------+----------+-----------------+---------------------+-------------------+------------+----------------+-------------+---------------+------------+--------------------+------+------------+------------------------+-------------+---------------------------+---------------------------+-----------+---------------------+-------------+-------------------------+--------------------------+-------------------+---------------------+----------------------+----------+----------+------------------+------------+-----------+--------------+-------------------------+--------------+-------------+------------+----------+------+---------------------------+--------------------+-------------+--------------------+----------+---------------+------------+------------+--------------+---------+-----------------------+---------------+-------------------------+------------------------------+----------------+-------------+--------------+-------------+---------------+-----------+-----------------------------+------------+--------------+----------+----------+-------------+----------+-------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| 5084894611  | Apr 7, 2021, 7:07:29 AM  | Desperados camp Day 4       | Ride          | Pre-epic                                                                           | 25473        | 164.2    | 165            | 248             | false   | null                  | Giant TCR Advanced 1 | activities/5421087598.fit.gz  | null           | 8           | 25473          | 19934       | 164206.4   | 21.2      | 8.238         | 1736           | 1729           | -36.8         | 572.4          | 21.3      | 0             | null                   | null                   | 108         | 79              | null             | 135                | null      | 206           | 4253     | null            | 24                  | 248               | null       | null           | null        | null          | null       | null               | null | null       | null                   | null        | 0                         | null                      | 0         | null                | 1           | null                    | 1617778816               | 1                 | 20.1                | 20.1                 | 11.1     | 0.56     | 1011.8           | 1.7        | 2.9       | 86           | 0                       | 1617766144   | 1617812352  | 0.86       | 4194513  | null | 0                         | null               | 0.11        | 16093              | 4        | 345.5         | null       | null       | null         | null    | null                  | null          | null                    | null                         | null           | null        | null         | null        | null          | null      | null                        | null       | null         | null     | null     | null        | null     | null        | media/68f7fee3-f6ed-4285-9bd5-a64271b3876e.jpg                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
++-------------+--------------------------+-----------------------------+---------------+------------------------------------------------------------------------------------+--------------+----------+----------------+-----------------+---------+-----------------------+----------------------+-------------------------------+----------------+-------------+----------------+-------------+------------+-----------+---------------+----------------+----------------+---------------+----------------+-----------+---------------+------------------------+------------------------+-------------+-----------------+------------------+--------------------+-----------+---------------+----------+-----------------+---------------------+-------------------+------------+----------------+-------------+---------------+------------+--------------------+------+------------+------------------------+-------------+---------------------------+---------------------------+-----------+---------------------+-------------+-------------------------+--------------------------+-------------------+---------------------+----------------------+----------+----------+------------------+------------+-----------+--------------+-------------------------+--------------+-------------+------------+----------+------+---------------------------+--------------------+-------------+--------------------+----------+---------------+------------+------------+--------------+---------+-----------------------+---------------+-------------------------+------------------------------+----------------+-------------+--------------+-------------+---------------+-----------+-----------------------------+------------+--------------+----------+----------+-------------+----------+-------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| 6178861995  | Oct 28, 2021, 6:09:52 AM | Cyprus Camp Day 5           | Ride          | null                                                                               | 30438        | 161.65   | 159            | 114             | false   | null                  | Giant TCR Advanced 1 | activities/6566187110.fit.gz  | null           | 8           | 30438          | 20881       | 161657.4   | 17.227    | 7.742         | 1484           | 1502           | -4            | 181.6          | 27.7      | 0             | null                   | null                   | 142         | 76              | null             | 121                | null      | 145           | 2956     | null            | 20                  | 114               | 2953912    | null           | null        | null          | null       | null               | null | null       | 178                    | 22443       | 0                         | null                      | 0         | null                | 1           | null                    | 1635400832               | 2                 | 22.3                | 22.3                 | 14.2     | 0.6      | 1016.9           | 1.8        | 1.9       | 73           | 0                       | 1635393920   | 1635433088  | 0.75       | 4194513  | null | 0                         | null               | 0.7         | 16093              | 1        | 285.2         | null       | null       | null         | 0       | 5.311                 | 102.7         | null                    | null                         | null           | null        | null         | null        | null          | null      | null                        | null       | null         | null     | null     | null        | null     | null        | media/a74a5532-85bc-40fe-9a4c-8645bca02811.jpg|media/c335908c-72d8-4a09-ac2f-1719bb665973.jpg                                                                                                                                                                                                                                                                                                                                                                                                                                        |
++-------------+--------------------------+-----------------------------+---------------+------------------------------------------------------------------------------------+--------------+----------+----------------+-----------------+---------+-----------------------+----------------------+-------------------------------+----------------+-------------+----------------+-------------+------------+-----------+---------------+----------------+----------------+---------------+----------------+-----------+---------------+------------------------+------------------------+-------------+-----------------+------------------+--------------------+-----------+---------------+----------+-----------------+---------------------+-------------------+------------+----------------+-------------+---------------+------------+--------------------+------+------------+------------------------+-------------+---------------------------+---------------------------+-----------+---------------------+-------------+-------------------------+--------------------------+-------------------+---------------------+----------------------+----------+----------+------------------+------------+-----------+--------------+-------------------------+--------------+-------------+------------+----------+------+---------------------------+--------------------+-------------+--------------------+----------+---------------+------------+------------+--------------+---------+-----------------------+---------------+-------------------------+------------------------------+----------------+-------------+--------------+-------------+---------------+-----------+-----------------------------+------------+--------------+----------+----------+-------------+----------+-------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| 9325531707  | Jun 24, 2023, 5:04:12 AM | Coup d'etat Ride            | Ride          | Wonderful ride with nice guys! Thank you [strava://athletes/71275936/10]Luis Chase | 31007        | 159.99   | 179            | 332             | false   | null                  | Giant TCR Advanced 1 | activities/10003255376.fit.gz | null           | null        | null           | null        | null       | null      | null          | null           | null           | null          | null           | null      | null          | null                   | null                   | null        | null            | null             | null               | null      | null          | null     | null            | null                | null              | null       | null           | null        | null          | null       | null               | null | null       | null                   | null        | null                      | null                      | null      | null                | null        | null                    | null                     | null              | null                | null                 | null     | null     | null             | null       | null      | null         | null                    | null         | null        | null       | null     | null | null                      | null               | null        | null               | null     | null          | null       | null       | null         | null    | null                  | null          | null                    | null                         | null           | null        | null         | null        | null          | null      | null                        | null       | null         | null     | null     | null        | null     | null        | media/0df135af-edfe-4148-af00-1d09287558b1.jpg|media/50663e37-4f88-407d-9fe2-b5c1187a2f69.jpg|media/c196fee3-6fa1-419d-aa9b-95050bead0b9.mp4|media/1e674155-6607-49fd-b28c-5bea672a8cd9.jpg|media/addc9782-4c14-43d5-a978-0c728442fc7c.jpg                                                                                                                                                                                                                                                                                           |
++-------------+--------------------------+-----------------------------+---------------+------------------------------------------------------------------------------------+--------------+----------+----------------+-----------------+---------+-----------------------+----------------------+-------------------------------+----------------+-------------+----------------+-------------+------------+-----------+---------------+----------------+----------------+---------------+----------------+-----------+---------------+------------------------+------------------------+-------------+-----------------+------------------+--------------------+-----------+---------------+----------+-----------------+---------------------+-------------------+------------+----------------+-------------+---------------+------------+--------------------+------+------------+------------------------+-------------+---------------------------+---------------------------+-----------+---------------------+-------------+-------------------------+--------------------------+-------------------+---------------------+----------------------+----------+----------+------------------+------------+-----------+--------------+-------------------------+--------------+-------------+------------+----------+------+---------------------------+--------------------+-------------+--------------------+----------+---------------+------------+------------+--------------+---------+-----------------------+---------------+-------------------------+------------------------------+----------------+-------------+--------------+-------------+---------------+-----------+-----------------------------+------------+--------------+----------+----------+-------------+----------+-------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+| 11993808841 | Jul 27, 2024, 7:16:28 AM | Morning Ride                | Ride          | null                                                                               | 22167        | 157.8    | 177            | 262             | false   | null                  | Rose xlite 04        | activities/12786638321.fit.gz | null           | 7.8         | 22167          | 18925       | 157800.3   | 18.886    | 8.338         | 1451           | 1489           | -6.8          | 624.2          | 23.4      | 0             | null                   | null                   | 93          | 68              | 177              | 137                | null      | 0             | 4130     | null            | 28                  | 262               | 3204       | null           | null        | null          | null       | null               | null | null       | 5                      | 19179       | 0                         | null                      | 0         | null                | 1           | null                    | 1722063616               | 2                 | 23                  | 25.6                 | 20.7     | 0.87     | 1012.7           | 0.7        | 1.6       | 24           | 0                       | 1722057600   | 1722108416  | 0.625      | 13283968 | null | 0                         | 1                  | 0.41        | 20127              | 1        | null          | null       | null       | null         | 0       | 7.119                 | 0             | null                    | null                         | null           | null        | null         | null        | 0             | 2         | null                        | null       | null         | null     | null     | null        | null     | null        | media/db7a0b8e-b71f-4a38-902e-3435ae00f790.jpg                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
++-------------+--------------------------+-----------------------------+---------------+------------------------------------------------------------------------------------+--------------+----------+----------------+-----------------+---------+-----------------------+----------------------+-------------------------------+----------------+-------------+----------------+-------------+------------+-----------+---------------+----------------+----------------+---------------+----------------+-----------+---------------+------------------------+------------------------+-------------+-----------------+------------------+--------------------+-----------+---------------+----------+-----------------+---------------------+-------------------+------------+----------------+-------------+---------------+------------+--------------------+------+------------+------------------------+-------------+---------------------------+---------------------------+-----------+---------------------+-------------+-------------------------+--------------------------+-------------------+---------------------+----------------------+----------+----------+------------------+------------+-----------+--------------+-------------------------+--------------+-------------+------------+----------+------+---------------------------+--------------------+-------------+--------------------+----------+---------------+------------+------------+--------------+---------+-----------------------+---------------+-------------------------+------------------------------+----------------+-------------+--------------+-------------+---------------+-----------+-----------------------------+------------+--------------+----------+----------+-------------+----------+-------------+--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+
+----
+
+In this table we can see all activity parameters that are downloaded from the Strava service itself (not from track files). There are various parameters, including such exotic ones as `Moon Phase`
+ifeval::["{page-localization}" == "RU"]
+(moon phase)
+endif::[]
+and `With Pet`
+ifeval::["{page-localization}" == "RU"]
+(_with pet_)
+endif::[]
+.
+
+Note that all velocities are in m/s, time is in seconds, and distance is in kilometres.
+
+[id=data_preparation]
+== Data cleaning and preparation
+
+Let's create a silver layer table `demo_geo_tracks_silver`. To do this, convert the time from the `activity date` column to the `xref:data_types/date_time.adoc#timestamp[TIMESTAMP]` type using the `xref:ROOT:functions/date_time.adoc#strptime[strptime]` function, which allows you to specify a specific pattern of text description of a moment in time. And merge the track table obtained from the activity files with the table obtained from the `strava_activities.csv` file, checking that `track_id` is contained in `filename` using the `xref:ROOT:functions/text.adoc#contains[contains]` function:
+
+[source,SQL]
+----
+CREATE OR REPLACE TABLE demo_geo_tracks_silver AS 
+    SELECT *, 
+        strptime("activity date", '%b %d, %Y, %H:%M:%S %p') as time_stamp 
+        FROM demo_geo_tracks
+        JOIN demo_geo_strava_activities ON (contains(filename, track_id));
+
+SELECT * FROM demo_geo_tracks_silver
+    LIMIT 10;
+----
+
+[source,output,role=output]
+----
+Done in 9.4 sec.
+
++-----------------+------------+-----------------+-----------------------+-----------------------+---------------+-------------+--------------------------+--------------------------------+---------------+-----------------------------------------+--------------+----------+----------------+-----------------+---------+-----------------------+----------------------+-------------------------------+----------------+-------------+----------------+-------------+------------+-----------+---------------+----------------+----------------+---------------+----------------+-----------+---------------+------------------------+------------------------+-------------+-----------------+------------------+--------------------+-----------+---------------+----------+-----------------+---------------------+-------------------+------------+----------------+-------------+---------------+------------+--------------------+------+------------+------------------------+-------------+---------------------------+---------------------------+-----------+---------------------+-------------+-------------------------+--------------------------+-------------------+---------------------+----------------------+----------+----------+------------------+------------+-----------+--------------+-------------------------+--------------+-------------+------------+----------+------+---------------------------+--------------------+-------------+--------------------+----------+---------------+------------+------------+--------------+---------+-----------------------+---------------+-------------------------+------------------------------+----------------+-------------+--------------+-------------+---------------+-----------+-----------------------------+------------+--------------+----------+----------+-------------+----------+-------------+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+---------------------+
+| track_id        | track_name | track_length_km | track_first_coord_lat | track_first_coord_lon | country       | activity id | activity date            | activity name                  | activity type | activity description                    | elapsed time | distance | max heart rate | relative effort | commute | activity private note | activity gear        | filename                      | athlete weight | bike weight | elapsed time_1 | moving time | distance_1 | max speed | average speed | elevation gain | elevation loss | elevation low | elevation high | max grade | average grade | average positive grade | average negative grade | max cadence | average cadence | max heart rate_1 | average heart rate | max watts | average watts | calories | max temperature | average temperature | relative effort_1 | total work | number of runs | uphill time | downhill time | other time | perceived exertion | type | start time | weighted average power | power count | prefer perceived exertion | perceived relative effort | commute_1 | total weight lifted | from upload | grade adjusted distance | weather observation time | weather condition | weather temperature | apparent temperature | dewpoint | humidity | weather pressure | wind speed | wind gust | wind bearing | precipitation intensity | sunrise time | sunset time | moon phase | bike     | gear | precipitation probability | precipitation type | cloud cover | weather visibility | uv index | weather ozone | jump count | total grit | average flow | flagged | average elapsed speed | dirt distance | newly explored distance | newly explored dirt distance | activity count | total steps | carbon saved | pool length | training load | intensity | average grade adjusted pace | timer time | total cycles | recovery | with pet | competition | long run | for a cause | media                                                                                                                                                                                                                                                                                     | time_stamp          |
++-----------------+------------+-----------------+-----------------------+-----------------------+---------------+-------------+--------------------------+--------------------------------+---------------+-----------------------------------------+--------------+----------+----------------+-----------------+---------+-----------------------+----------------------+-------------------------------+----------------+-------------+----------------+-------------+------------+-----------+---------------+----------------+----------------+---------------+----------------+-----------+---------------+------------------------+------------------------+-------------+-----------------+------------------+--------------------+-----------+---------------+----------+-----------------+---------------------+-------------------+------------+----------------+-------------+---------------+------------+--------------------+------+------------+------------------------+-------------+---------------------------+---------------------------+-----------+---------------------+-------------+-------------------------+--------------------------+-------------------+---------------------+----------------------+----------+----------+------------------+------------+-----------+--------------+-------------------------+--------------+-------------+------------+----------+------+---------------------------+--------------------+-------------+--------------------+----------+---------------+------------+------------+--------------+---------+-----------------------+---------------+-------------------------+------------------------------+----------------+-------------+--------------+-------------+---------------+-----------+-----------------------------+------------+--------------+----------+----------+-------------+----------+-------------+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+---------------------+
+| 8205566762.fit  | null       | 51.04           | 52.47870256192982     | 13.336647050455213    | Deutschland   | 7688162488  | Aug 23, 2022, 4:39:47 PM | Berlin Recon                   | Ride          | null                                    | 7740         | 51.04    | 174            | 73              | false   | null                  | Giant TCR Advanced 1 | activities/8205566762.fit.gz  | null           | 8           | 7740           | 6518        | 51044.1    | 16.012    | 7.831         | 174            | 188            | 18.6          | 68.4           | 9.3       | 0             | null                   | null                   | 116         | 73              | null             | 134                | null      | 168           | 1083     | null            | 22                  | 73                | 1082634    | null           | null        | null          | null       | null               | null | null       | 202                    | 7738        | 0                         | null                      | 0         | null                | 1           | null                    | 1661270400               | 2                 | 24.5                | 24.6                 | 15.6     | 0.58     | 1018.7           | 3.5        | 3.8       | 60           | 0                       | 1661227392   | 1661278592  | 0.89       | 4194513  | null | 0                         | null               | 0.34        | 16093              | 1        | 301.9         | null       | null       | null         | 0       | 6.595                 | 332.6         | null                    | null                         | null           | null        | null         | null        | null          | null      | null                        | null       | null         | null     | null     | null        | null     | null        | media/f6509beb-c34d-4eb4-97c1-9c80b92308ec.jpg|media/f2fe2880-42a1-4794-bef0-b5d563437aca.jpg                                                                                                                                                                                             | 2022-08-23 16:39:47 |
++-----------------+------------+-----------------+-----------------------+-----------------------+---------------+-------------+--------------------------+--------------------------------+---------------+-----------------------------------------+--------------+----------+----------------+-----------------+---------+-----------------------+----------------------+-------------------------------+----------------+-------------+----------------+-------------+------------+-----------+---------------+----------------+----------------+---------------+----------------+-----------+---------------+------------------------+------------------------+-------------+-----------------+------------------+--------------------+-----------+---------------+----------+-----------------+---------------------+-------------------+------------+----------------+-------------+---------------+------------+--------------------+------+------------+------------------------+-------------+---------------------------+---------------------------+-----------+---------------------+-------------+-------------------------+--------------------------+-------------------+---------------------+----------------------+----------+----------+------------------+------------+-----------+--------------+-------------------------+--------------+-------------+------------+----------+------+---------------------------+--------------------+-------------+--------------------+----------+---------------+------------+------------+--------------+---------+-----------------------+---------------+-------------------------+------------------------------+----------------+-------------+--------------+-------------+---------------+-----------+-----------------------------+------------+--------------+----------+----------+-------------+----------+-------------+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+---------------------+
+| 5758691664.fit  | null       | 3.92            | 55.7587356492877      | 37.745437659323215    | Россия        | 5408223435  | Jun 3, 2021, 6:35:24 PM  | Ночной заезд                   | Ride          | null                                    | 554          | 3.91     | 143            | 2               | false   | null                  | Giant TCR Advanced 1 | activities/5758691664.fit.gz  | null           | 8           | 554            | 554         | 3918.7     | 11.3      | 7.073         | 15             | 20             | 110.2         | 130.8          | 4.7       | -0.2          | null                   | null                   | 92          | 67              | null             | 122                | null      | 127           | 68       | null            | 18                  | 2                 | 68242      | null           | null        | null          | null       | null               | null | null       | 141                    | 555         | null                      | null                      | 0         | null                | 1           | null                    | 1622743168               | 1                 | 17.6                | 17.6                 | 6.2      | 0.47     | 1024.7           | 3.5        | 8.7       | 42           | 0                       | 1622681472   | 1622743552  | 0.8        | 4194513  | null | 0                         | null               | 0.28        | 16093              | 0        | 339           | null       | null       | null         | null    | null                  | null          | null                    | null                         | null           | null        | null         | null        | null          | null      | null                        | null       | null         | null     | null     | null        | null     | null        | null                                                                                                                                                                                                                                                                                      | 2021-06-03 18:35:24 |
++-----------------+------------+-----------------+-----------------------+-----------------------+---------------+-------------+--------------------------+--------------------------------+---------------+-----------------------------------------+--------------+----------+----------------+-----------------+---------+-----------------------+----------------------+-------------------------------+----------------+-------------+----------------+-------------+------------+-----------+---------------+----------------+----------------+---------------+----------------+-----------+---------------+------------------------+------------------------+-------------+-----------------+------------------+--------------------+-----------+---------------+----------+-----------------+---------------------+-------------------+------------+----------------+-------------+---------------+------------+--------------------+------+------------+------------------------+-------------+---------------------------+---------------------------+-----------+---------------------+-------------+-------------------------+--------------------------+-------------------+---------------------+----------------------+----------+----------+------------------+------------+-----------+--------------+-------------------------+--------------+-------------+------------+----------+------+---------------------------+--------------------+-------------+--------------------+----------+---------------+------------+------------+--------------+---------+-----------------------+---------------+-------------------------+------------------------------+----------------+-------------+--------------+-------------+---------------+-----------+-----------------------------+------------+--------------+----------+----------+-------------+----------+-------------+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+---------------------+
+| 7562241822.fit  | null       | 21.69           | 36.594818104058504    | 30.56384850293398     | Türkiye       | 7103414491  | May 7, 2022, 3:04:49 PM  | Вечерний велозаезд             | Ride          | Завтра будем страдать в длинную гору    | 3044         | 21.69    | 148            | 10              | false   | null                  | Giant TCR Advanced 1 | activities/7562241822.fit.gz  | null           | 8           | 3044           | 2786        | 21692.4    | 16.224    | 7.786         | 105            | 119            | 2             | 45             | 8.1       | 0             | null                   | null                   | 129         | 66              | null             | 108                | null      | 126           | 345      | null            | 21                  | 10                | 343778     | null           | null        | null          | null       | null               | null | null       | 175                    | 3045        | 0                         | null                      | 0         | null                | 1           | null                    | 1651935616               | 2                 | 22.5                | 22.5                 | 9.7      | 0.44     | 1013             | 3.5        | 4.6       | 196          | 0                       | 1651892352   | 1651942272  | 0.21       | 4194513  | null | 0                         | null               | 0.45        | 16093              | 1        | 352.8         | null       | null       | null         | 0       | 7.126                 | 645           | null                    | null                         | null           | null        | null         | null        | null          | null      | null                        | null       | null         | null     | null     | null        | null     | null        | media/318cbe19-4ae0-4800-a873-349417c4df90.jpg                                                                                                                                                                                                                                            | 2022-05-07 15:04:49 |
++-----------------+------------+-----------------+-----------------------+-----------------------+---------------+-------------+--------------------------+--------------------------------+---------------+-----------------------------------------+--------------+----------+----------------+-----------------+---------+-----------------------+----------------------+-------------------------------+----------------+-------------+----------------+-------------+------------+-----------+---------------+----------------+----------------+---------------+----------------+-----------+---------------+------------------------+------------------------+-------------+-----------------+------------------+--------------------+-----------+---------------+----------+-----------------+---------------------+-------------------+------------+----------------+-------------+---------------+------------+--------------------+------+------------+------------------------+-------------+---------------------------+---------------------------+-----------+---------------------+-------------+-------------------------+--------------------------+-------------------+---------------------+----------------------+----------+----------+------------------+------------+-----------+--------------+-------------------------+--------------+-------------+------------+----------+------+---------------------------+--------------------+-------------+--------------------+----------+---------------+------------+------------+--------------+---------+-----------------------+---------------+-------------------------+------------------------------+----------------+-------------+--------------+-------------+---------------+-----------+-----------------------------+------------+--------------+----------+----------+-------------+----------+-------------+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+---------------------+
+| 5752363946.fit  | null       | 62.85           | 55.764476750046015    | 37.71281814202666     | Россия        | 5402167712  | Jun 2, 2021, 3:55:33 PM  | Вечерний велозаезд             | Ride          | null                                    | 8485         | 62.85    | 169            | 125             | false   | null                  | Giant TCR Advanced 1 | activities/5752363946.fit.gz  | null           | 8           | 8485           | 7359        | 62849.2    | 14.5      | 8.54          | 220            | 255            | 154.2         | 226.2          | 10.7      | 0             | null                   | null                   | 168         | 81              | null             | 143                | null      | 208           | 1527     | null            | 16                  | 125               | 1530481    | null           | null        | null          | null       | null               | null | null       | 224                    | 7711        | null                      | null                      | 0         | null                | 1           | null                    | 1622646016               | 2                 | 19.7                | 19.7                 | 5.6      | 0.4      | 1023.4           | 4.3        | 6.3       | 38           | 0                       | 1622595200   | 1622657152  | 0.76       | 4194513  | null | 0                         | null               | 0.68        | 16093              | 1        | 360           | null       | null       | null         | null    | null                  | null          | null                    | null                         | null           | null        | null         | null        | null          | null      | null                        | null       | null         | null     | null     | null        | null     | null        | null                                                                                                                                                                                                                                                                                      | 2021-06-02 15:55:33 |
++-----------------+------------+-----------------+-----------------------+-----------------------+---------------+-------------+--------------------------+--------------------------------+---------------+-----------------------------------------+--------------+----------+----------------+-----------------+---------+-----------------------+----------------------+-------------------------------+----------------+-------------+----------------+-------------+------------+-----------+---------------+----------------+----------------+---------------+----------------+-----------+---------------+------------------------+------------------------+-------------+-----------------+------------------+--------------------+-----------+---------------+----------+-----------------+---------------------+-------------------+------------+----------------+-------------+---------------+------------+--------------------+------+------------+------------------------+-------------+---------------------------+---------------------------+-----------+---------------------+-------------+-------------------------+--------------------------+-------------------+---------------------+----------------------+----------+----------+------------------+------------+-----------+--------------+-------------------------+--------------+-------------+------------+----------+------+---------------------------+--------------------+-------------+--------------------+----------+---------------+------------+------------+--------------+---------+-----------------------+---------------+-------------------------+------------------------------+----------------+-------------+--------------+-------------+---------------+-----------+-----------------------------+------------+--------------+----------+----------+-------------+----------+-------------+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+---------------------+
+| 5774225138.fit  | null       | 114.24          | 55.99621960893273     | 36.27057650126517     | Россия        | 5423038640  | Jun 6, 2021, 8:24:11 AM  | Granfondo Волоколамск Группа Б | Ride          | 6 место в личном зачете и 1 в командном | 10566        | 114.24   | 189            | 284             | false   | null                  | Giant TCR Advanced 1 | activities/5774225138.fit.gz  | null           | 8           | 10566          | 10496       | 114243.9   | 22.1      | 10.885        | 917            | 894            | 152.8         | 262.8          | 9.6       | 0             | null                   | null                   | 173         | 80              | null             | 154                | null      | 199           | 2027     | null            | 26                  | 284               | 2026580    | null           | null        | null          | null       | null               | null | null       | 242                    | 10567       | 0                         | null                      | 0         | null                | 1           | null                    | 1622966400               | 2                 | 22.1                | 22.1                 | 10.2     | 0.47     | 1014.9           | 3.5        | 4         | 71           | 0.1                     | 1622940800   | 1623003392  | 0.89       | 4194513  | null | 0.01                      | 5                  | 0.45        | 16093              | 5        | 341.8         | null       | null       | null         | null    | null                  | null          | null                    | null                         | null           | null        | null         | null        | null          | null      | null                        | null       | null         | null     | null     | null        | null     | null        | media/946f24a2-cd5f-4b18-ae4b-822158a40244.jpg|media/7d11f14c-7845-489a-bb34-f71b882c47e6.jpg|media/08fe3d9d-2f68-4319-b5ce-00c6a6282a49.jpg|media/679c1351-1ac7-4a72-a525-c3bc1766c202.jpg|media/ba7f9fd0-a470-45d9-8083-00ab445251cd.jpg|media/df115e87-def4-46ee-9f7e-899fd370903e.jpg | 2021-06-06 08:24:11 |
++-----------------+------------+-----------------+-----------------------+-----------------------+---------------+-------------+--------------------------+--------------------------------+---------------+-----------------------------------------+--------------+----------+----------------+-----------------+---------+-----------------------+----------------------+-------------------------------+----------------+-------------+----------------+-------------+------------+-----------+---------------+----------------+----------------+---------------+----------------+-----------+---------------+------------------------+------------------------+-------------+-----------------+------------------+--------------------+-----------+---------------+----------+-----------------+---------------------+-------------------+------------+----------------+-------------+---------------+------------+--------------------+------+------------+------------------------+-------------+---------------------------+---------------------------+-----------+---------------------+-------------+-------------------------+--------------------------+-------------------+---------------------+----------------------+----------+----------+------------------+------------+-----------+--------------+-------------------------+--------------+-------------+------------+----------+------+---------------------------+--------------------+-------------+--------------------+----------+---------------+------------+------------+--------------+---------+-----------------------+---------------+-------------------------+------------------------------+----------------+-------------+--------------+-------------+---------------+-----------+-----------------------------+------------+--------------+----------+----------+-------------+----------+-------------+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+---------------------+
+| 3602018438.fit  | null       | 34.76           | 55.76445009559393     | 37.712875390425324    | Россия        | 3370915442  | Apr 29, 2020, 2:03:19 PM | Дневной велозаезд              | Ride          | null                                    | 4075         | 34.76    | 174            | 127             | false   | null                  | Giant TCR Advanced 1 | activities/3602018438.fit.gz  | 83             | 8           | 4075           | 3946        | 34762.6    | 15        | 8.801         | 140            | 146            | 132           | 162.6          | 17.6      | 0             | null                   | null                   | 104         | 86              | 174              | 159                | null      | 191           | 1088     | null            | 11                  | 127               | null       | null           | null        | null          | null       | null               | null | null       | null                   | null        | null                      | null                      | 0         | null                | 1           | null                    | 1588168832               | 2                 | 11.5                | 11.5                 | 0        | 0.45     | 1000.3           | 7.4        | 12.1      | 301          | 0                       | 1588125056   | 1588179840  | 0.21       | 4194513  | null | 0                         | null               | 0.53        | 16093              | 1        | 367.2         | null       | null       | null         | null    | null                  | null          | null                    | null                         | null           | null        | null         | null        | null          | null      | null                        | null       | null         | null     | null     | null        | null     | null        | null                                                                                                                                                                                                                                                                                      | 2020-04-29 14:03:19 |
++-----------------+------------+-----------------+-----------------------+-----------------------+---------------+-------------+--------------------------+--------------------------------+---------------+-----------------------------------------+--------------+----------+----------------+-----------------+---------+-----------------------+----------------------+-------------------------------+----------------+-------------+----------------+-------------+------------+-----------+---------------+----------------+----------------+---------------+----------------+-----------+---------------+------------------------+------------------------+-------------+-----------------+------------------+--------------------+-----------+---------------+----------+-----------------+---------------------+-------------------+------------+----------------+-------------+---------------+------------+--------------------+------+------------+------------------------+-------------+---------------------------+---------------------------+-----------+---------------------+-------------+-------------------------+--------------------------+-------------------+---------------------+----------------------+----------+----------+------------------+------------+-----------+--------------+-------------------------+--------------+-------------+------------+----------+------+---------------------------+--------------------+-------------+--------------------+----------+---------------+------------+------------+--------------+---------+-----------------------+---------------+-------------------------+------------------------------+----------------+-------------+--------------+-------------+---------------+-----------+-----------------------------+------------+--------------+----------+----------+-------------+----------+-------------+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+---------------------+
+| 2665481253.fit  | null       | 43.88           | 57.06134635023773     | 23.311248868703842    | Latvija       | 2509891301  | Jul 6, 2019, 6:12:44 PM  | Night ride                     | Ride          | null                                    | 4958         | 43.88    | 163            | 85              | false   | null                  | Giant TCR Advanced 1 | activities/2665481253.fit.gz  | 83             | 8           | 4958           | 4958        | 43880      | 12.2      | null          | 51             | 43             | -1            | 6              | 7.7       | 0             | null                   | null                   | 101         | 89              | 163              | 143                | null      | 170           | 1395     | null            | 12                  | 85                | null       | null           | null        | null          | null       | null               | null | null       | null                   | null        | null                      | null                      | null      | null                | null        | null                    | null                     | null              | null                | null                 | null     | null     | null             | null       | null      | null         | null                    | null         | null        | null       | 4194513  | null | null                      | null               | null        | null               | null     | null          | null       | null       | null         | null    | null                  | null          | null                    | null                         | null           | null        | null         | null        | null          | null      | null                        | null       | null         | null     | null     | null        | null     | null        | null                                                                                                                                                                                                                                                                                      | 2019-07-06 18:12:44 |
++-----------------+------------+-----------------+-----------------------+-----------------------+---------------+-------------+--------------------------+--------------------------------+---------------+-----------------------------------------+--------------+----------+----------------+-----------------+---------+-----------------------+----------------------+-------------------------------+----------------+-------------+----------------+-------------+------------+-----------+---------------+----------------+----------------+---------------+----------------+-----------+---------------+------------------------+------------------------+-------------+-----------------+------------------+--------------------+-----------+---------------+----------+-----------------+---------------------+-------------------+------------+----------------+-------------+---------------+------------+--------------------+------+------------+------------------------+-------------+---------------------------+---------------------------+-----------+---------------------+-------------+-------------------------+--------------------------+-------------------+---------------------+----------------------+----------+----------+------------------+------------+-----------+--------------+-------------------------+--------------+-------------+------------+----------+------+---------------------------+--------------------+-------------+--------------------+----------+---------------+------------+------------+--------------+---------+-----------------------+---------------+-------------------------+------------------------------+----------------+-------------+--------------+-------------+---------------+-----------+-----------------------------+------------+--------------+----------+----------+-------------+----------+-------------+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+---------------------+
+| 5061483340.fit  | null       | 16.87           | 40.78166037797928     | -73.96295428276062    | United States | 4741945778  | Feb 6, 2021, 7:18:45 AM  | NYC                            | Virtual Ride  | null                                    | 1976         | 16.87    | 157            | 16              | false   | null                  | Giant TCR Advanced 1 | activities/5061483340.fit.gz  | null           | 8           | 1976           | 1953        | 16870.5    | 15.2      | 8.638         | 176            | 0              | 17            | 46.2           | 12.4      | -0.1          | null                   | null                   | 103         | 89              | null             | 133                | null      | 169           | 313      | null            | null                | 16                | null       | null           | null        | null          | null       | null               | null | null       | 175                    | 1977        | null                      | null                      | 0         | null                | 1           | null                    | null                     | null              | null                | null                 | null     | null     | null             | null       | null      | null         | null                    | null         | null        | null       | 4194513  | null | null                      | null               | null        | null               | null     | null          | null       | null       | null         | null    | null                  | null          | null                    | null                         | null           | null        | null         | null        | null          | null      | null                        | null       | null         | null     | null     | null        | null     | null        | media/9218c649-fc79-4378-a133-5d691bd50c38.jpg                                                                                                                                                                                                                                            | 2021-02-06 07:18:45 |
++-----------------+------------+-----------------+-----------------------+-----------------------+---------------+-------------+--------------------------+--------------------------------+---------------+-----------------------------------------+--------------+----------+----------------+-----------------+---------+-----------------------+----------------------+-------------------------------+----------------+-------------+----------------+-------------+------------+-----------+---------------+----------------+----------------+---------------+----------------+-----------+---------------+------------------------+------------------------+-------------+-----------------+------------------+--------------------+-----------+---------------+----------+-----------------+---------------------+-------------------+------------+----------------+-------------+---------------+------------+--------------------+------+------------+------------------------+-------------+---------------------------+---------------------------+-----------+---------------------+-------------+-------------------------+--------------------------+-------------------+---------------------+----------------------+----------+----------+------------------+------------+-----------+--------------+-------------------------+--------------+-------------+------------+----------+------+---------------------------+--------------------+-------------+--------------------+----------+---------------+------------+------------+--------------+---------+-----------------------+---------------+-------------------------+------------------------------+----------------+-------------+--------------+-------------+---------------+-----------+-----------------------------+------------+--------------+----------+----------+-------------+----------+-------------+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+---------------------+
+| 1842519266.fit  | null       | 71.94           | 55.73788298293948     | 37.65193585306406     | Россия        | 1717234129  | Jul 21, 2018, 9:51:37 AM | Noon ride                      | Ride          | null                                    | 9707         | 71.94    | 170            | 186             | false   | null                  | Giant TCR Advanced 1 | activities/1842519266.fit.gz  | 83             | 8           | 9707           | 8353        | 71942      | 13.6      | null          | 313            | 299            | 110           | 193            | 33.3      | 0             | null                   | null                   | 101         | 86              | 170              | 148                | null      | 178           | 2298     | null            | 27                  | 186               | null       | null           | null        | null          | null       | null               | null | null       | null                   | null        | null                      | null                      | 0         | null                | null        | null                    | null                     | null              | null                | null                 | null     | null     | null             | null       | null      | null         | null                    | null         | null        | null       | 4194513  | null | null                      | null               | null        | null               | null     | null          | null       | null       | null         | null    | null                  | null          | null                    | null                         | null           | null        | null         | null        | null          | null      | null                        | null       | null         | null     | null     | null        | null     | null        | null                                                                                                                                                                                                                                                                                      | 2018-07-21 09:51:37 |
++-----------------+------------+-----------------+-----------------------+-----------------------+---------------+-------------+--------------------------+--------------------------------+---------------+-----------------------------------------+--------------+----------+----------------+-----------------+---------+-----------------------+----------------------+-------------------------------+----------------+-------------+----------------+-------------+------------+-----------+---------------+----------------+----------------+---------------+----------------+-----------+---------------+------------------------+------------------------+-------------+-----------------+------------------+--------------------+-----------+---------------+----------+-----------------+---------------------+-------------------+------------+----------------+-------------+---------------+------------+--------------------+------+------------+------------------------+-------------+---------------------------+---------------------------+-----------+---------------------+-------------+-------------------------+--------------------------+-------------------+---------------------+----------------------+----------+----------+------------------+------------+-----------+--------------+-------------------------+--------------+-------------+------------+----------+------+---------------------------+--------------------+-------------+--------------------+----------+---------------+------------+------------+--------------+---------+-----------------------+---------------+-------------------------+------------------------------+----------------+-------------+--------------+-------------+---------------+-----------+-----------------------------+------------+--------------+----------+----------+-------------+----------+-------------+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+---------------------+
+| 11417255201.fit | null       | 30.91           | 36.71511836349964     | -4.2892365250736475   | España        | 10674837301 | Feb 1, 2024, 2:24:07 PM  | Afternoon Ride                 | Ride          | From new apartment                      | 4793         | 30.91    | 166            | 67              | false   | null                  | Rose xlite 04        | activities/11417255201.fit.gz | null           | 7.8         | 4793           | 4571        | 30913.6    | 15.33     | 6.763         | 658            | 676            | 8.8           | 509.8          | 20.3      | 0             | null                   | null                   | 118         | 74              | null             | 137                | null      | 188           | 850      | null            | 15                  | 67                | 849803     | null           | null        | null          | null       | null               | null | null       | 227                    | 4794        | 0                         | null                      | 0         | null                | 1           | null                    | 1706796032               | 1                 | 16.9                | 16.4                 | 10.4     | 0.65     | 1033             | 2.7        | 5.9       | 128          | 0                       | 1706771968   | 1706809344  | 0.625      | 13283968 | null | 0                         | 1                  | 0.29        | 26463              | 2        | null          | null       | null       | null         | 0       | 6.45                  | 109.7         | null                    | null                         | null           | null        | null         | null        | null          | null      | null                        | null       | null         | null     | null     | null        | null     | null        | media/da2f0e86-c77e-42c2-b7c5-5d08d0ac7acf.jpg                                                                                                                                                                                                                                            | 2024-02-01 14:24:07 |
++-----------------+------------+-----------------+-----------------------+-----------------------+---------------+-------------+--------------------------+--------------------------------+---------------+-----------------------------------------+--------------+----------+----------------+-----------------+---------+-----------------------+----------------------+-------------------------------+----------------+-------------+----------------+-------------+------------+-----------+---------------+----------------+----------------+---------------+----------------+-----------+---------------+------------------------+------------------------+-------------+-----------------+------------------+--------------------+-----------+---------------+----------+-----------------+---------------------+-------------------+------------+----------------+-------------+---------------+------------+--------------------+------+------------+------------------------+-------------+---------------------------+---------------------------+-----------+---------------------+-------------+-------------------------+--------------------------+-------------------+---------------------+----------------------+----------+----------+------------------+------------+-----------+--------------+-------------------------+--------------+-------------+------------+----------+------+---------------------------+--------------------+-------------+--------------------+----------+---------------+------------+------------+--------------+---------+-----------------------+---------------+-------------------------+------------------------------+----------------+-------------+--------------+-------------+---------------+-----------+-----------------------------+------------+--------------+----------+----------+-------------+----------+-------------+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------+---------------------+
+----
+
+
+Now let's create a table of silver layer points -- leave only the necessary columns in it, convert the data in the `time_text` column to the `xref:data_types/date_time.adoc#timestamp[TIMESTAMP]` type (using the `xref:ROOT:functions/date_time.adoc#strptime[strptime]` and `xref:ROOT:functions/regular_expressions.adoc#regexp_extract[regexp_extract]` functions), and filter out all points where the `latitude` or `longitude` value is empty:
+
+[source,SQL]
+----
+CREATE OR REPLACE TABLE demo_geo_points_silver AS
+    SELECT
+        track_id,
+        latitude,
+        longitude,
+        elevation,
+        temperature,
+        power,
+        speed,
+        strptime(regexp_extract(time_text, '^.{19}'), '%c') as time_stamp,
+    FROM demo_geo_points
+    WHERE latitude IS NOT NULL AND longitude IS NOT NULL;
+
+SELECT *
+    FROM demo_geo_points_silver
+    LIMIT 10;
+----
+
+[source,output,role=output]
+----
+Done in 11.6 sec.
+
++----------------+--------------------+--------------------+--------------------+-------------+-------+--------------------+---------------------+
+| track_id       | latitude           | longitude          | elevation          | temperature | power | speed              | time_stamp          |
++----------------+--------------------+--------------------+--------------------+-------------+-------+--------------------+---------------------+
+| 3922792040.fit | 55.84256364963949  | 37.73899080231786  | 167.60000000000002 | 24          | null  | 36.619200000000006 | 2020-06-26 13:44:05 |
++----------------+--------------------+--------------------+--------------------+-------------+-------+--------------------+---------------------+
+| 3922792040.fit | 55.842567421495914 | 37.73883054032922  | 167.60000000000002 | 24          | null  | 36.781200000000005 | 2020-06-26 13:44:06 |
++----------------+--------------------+--------------------+--------------------+-------------+-------+--------------------+---------------------+
+| 3922792040.fit | 55.842567421495914 | 37.73866650648415  | 167.60000000000002 | 24          | null  | 37.0512            | 2020-06-26 13:44:07 |
++----------------+--------------------+--------------------+--------------------+-------------+-------+--------------------+---------------------+
+| 3922792040.fit | 55.842567421495914 | 37.73849870078266  | 167.60000000000002 | 24          | null  | 37.3068            | 2020-06-26 13:44:08 |
++----------------+--------------------+--------------------+--------------------+-------------+-------+--------------------+---------------------+
+| 3922792040.fit | 55.84256364963949  | 37.73833081126213  | 167.60000000000002 | 24          | null  | 37.4652            | 2020-06-26 13:44:09 |
++----------------+--------------------+--------------------+--------------------+-------------+-------+--------------------+---------------------+
+| 3922792040.fit | 55.8425560221076   | 37.738166777417064 | 167.60000000000002 | 24          | null  | 37.7856            | 2020-06-26 13:44:10 |
++----------------+--------------------+--------------------+--------------------+-------------+-------+--------------------+---------------------+
+| 3922792040.fit | 55.842548394575715 | 37.73799511604011  | 167.39999999999998 | 24          | null  | 37.980000000000004 | 2020-06-26 13:44:11 |
++----------------+--------------------+--------------------+--------------------+-------------+-------+--------------------+---------------------+
+| 3922792040.fit | 55.842544538900256 | 37.7378349378705   | 167.20000000000005 | 24          | null  | 38.037600000000005 | 2020-06-26 13:44:12 |
++----------------+--------------------+--------------------+--------------------+-------------+-------+--------------------+---------------------+
+| 3922792040.fit | 55.84254076704383  | 37.737670904025435 | 167                | 24          | null  | 38.037600000000005 | 2020-06-26 13:44:13 |
++----------------+--------------------+--------------------+--------------------+-------------+-------+--------------------+---------------------+
+| 3922792040.fit | 55.84253691136837  | 37.73749924264848  | 166.79999999999995 | 24          | null  | 38.419200000000004 | 2020-06-26 13:44:14 |
++----------------+--------------------+--------------------+--------------------+-------------+-------+--------------------+---------------------+
+----
+
+
+== Analyses
+
+A wide variety of statistics can be derived from the data generated above. We will limit ourselves here to just a few examples.
+
+=== Statistics by country
+
+Let's display the total mileage in kilometres for all tracks with the start in a given country, excluding virtual races. Order the result in descending order of total mileage. Use functions `xref:ROOT:functions/numeric.adoc#round[round]` and `xref:ROOT:functions/aggregates.adoc#sum[sum]`.
+
+[source,SQL]
+----
+SELECT
+    country AS "Country",
+    round(sum(distance)) AS "Total distance, km",
+FROM demo_geo_tracks_silver
+WHERE NOT "Activity Type" = 'Virtual Ride'
+GROUP BY 1
+ORDER BY 2 DESC
+----
+
+[source,output,role=output]
+----
++--------------------------------+--------------------+
+| Country                        | Total distance, km |
++--------------------------------+--------------------+
+| Россия                         | 36947              |
++--------------------------------+--------------------+
+| España                         | 30437              |
++--------------------------------+--------------------+
+| Türkiye                        | 8255               |
++--------------------------------+--------------------+
+| Deutschland                    | 6033               |
++--------------------------------+--------------------+
+| Italia                         | 2681               |
++--------------------------------+--------------------+
+| France                         | 1833               |
++--------------------------------+--------------------+
+| Κύπρος - Kıbrıs                | 1452               |
++--------------------------------+--------------------+
+| Latvija                        | 1191               |
++--------------------------------+--------------------+
+| Schweiz/Suisse/Svizzera/Svizra | 708                |
++--------------------------------+--------------------+
+| Sverige                        | 615                |
++--------------------------------+--------------------+
+| Հայաստան                       | 595                |
++--------------------------------+--------------------+
+| Magyarország                   | 421                |
++--------------------------------+--------------------+
+| Nederland                      | 408                |
++--------------------------------+--------------------+
+| Österreich                     | 352                |
++--------------------------------+--------------------+
+| Slovensko                      | 223                |
++--------------------------------+--------------------+
+| Unknown                        | 56                 |
++--------------------------------+--------------------+
+| United Kingdom                 | 48                 |
++--------------------------------+--------------------+
+----
+
+We obtained a table ranking countries according to the total mileage in each country.
+
+[id=one_activity_analysis]
+=== Analysing several indicators within one activity
+
+Let's generate a graph that simultaneously shows speed, altitude and power inside one given https://www.strava.com/activities/15568301198[activity,window=_blank] with minute-by-minute segmentation and an additional start time constraint. We use the functions `xref:ROOT:functions/aggregates.adoc#avg[avg]`, `xref:ROOT:functions/numeric.adoc#round[round]` and `xref:ROOT:functions/date_time.adoc#date_trunc[date_trunc]` with the parameter `minute`.
+
+[source,SQL]
+----
+SELECT
+	round(avg(power)) AS "power, w",
+	round(avg(elevation)) AS "elevation, m",
+	round(avg(speed)) AS "speed, km/h",
+	date_trunc('minute', time_stamp) as time,
+FROM demo_geo_points_silver
+WHERE track_id = '16627535673.fit' and time_stamp < (timestamp '2025-08-24 07:30:00')
+GROUP BY TIME
+ORDER BY TIME
+----
+
+[source,output,role=output]
+----
+Done in 8.5 sec.
+
++----------+--------------+-------------+---------------------+
+| power, w | elevation, m | speed, km/h | time                |
++----------+--------------+-------------+---------------------+
+| 181      | 108          | 21          | 2025-08-24 07:30:00 |
++----------+--------------+-------------+---------------------+
+| 269      | 112          | 20          | 2025-08-24 07:31:00 |
++----------+--------------+-------------+---------------------+
+| 130      | 121          | 18          | 2025-08-24 07:32:00 |
++----------+--------------+-------------+---------------------+
+| 237      | 128          | 12          | 2025-08-24 07:33:00 |
++----------+--------------+-------------+---------------------+
+| 278      | 143          | 12          | 2025-08-24 07:34:00 |
++----------+--------------+-------------+---------------------+
+| ...      | ...          | ...         | ...                 |
++----------+--------------+-------------+---------------------+
+201 rows
+----
+
+To display the chart, let's use the *Chart* tab in the cell output interface:
+
+image::{page-version}@ROOT:geo_data/img1.png[]
+
+We have a graph that simultaneously displays several different metrics for a given activity -- speed, altitude, and power. Hovering the mouse over a line on the graph shows the value at that point. In these graphs, users can examine the metrics as they relate to each other. For example, in this case, you can see that speed increases on downhills and power decreases on uphills, while the opposite is true on uphills.
+
+=== Power distribution within an activity
+
+Let's plot the power distribution within the same activity in 25 watt increments. To do this, let's use the function `xref:ROOT:functions/numeric.adoc#floor[floor]`.
+
+[source,SQL]
+----
+SELECT
+	floor(power/25)*25 AS power,
+	count(*) AS count
+FROM demo_geo_points_silver
+WHERE track_id = '16627535673.fit' AND power > 0
+GROUP BY 1
+ORDER BY 1
+----
+
+[source,output,role=output]
+----
+Done in 8.2 sec.
+
++-------+-------+
+| power | count |
++-------+-------+
+| 0     | 230   |
++-------+-------+
+| 25    | 177   |
++-------+-------+
+| 50    | 182   |
++-------+-------+
+| 75    | 213   |
++-------+-------+
+| 100   | 366   |
++-------+-------+
+| ...   | ...   |
++-------+-------+
+30 rows
+----
+
+To display the chart, let's use the *Chart* tab in the cell output interface:
+
+image::{page-version}@ROOT:geo_data/img2.png[]
+
+We have obtained a graph of power distribution within one activity in 25 watt increments.
+
+=== Statistics by calendar periods
+
+To display detailed statistics by calendar periods (months, days of the week, hours within a day, etc.), let's create a new table based on `demo_geo_tracks_silver`, in which we will add columns corresponding to different time periods. Use the `xref:ROOT:functions/blob.adoc#concat[concat]` and `xref:ROOT:functions/regular_expressions.adoc#regexp_extract[regexp_extract]` functions for this purpose.
+
+
+[source,SQL]
+----
+
+CREATE OR REPLACE TABLE demo_geo_tracks_silver_time AS
+SELECT
+    track_id,
+    hour(time_stamp) AS hour,
+    regexp_extract(string(time_stamp), '.{5} ') as day_of_year,
+    month(time_stamp) AS month,
+    monthname(time_stamp) AS month_name,
+    dayname(time_stamp) AS day_name,
+    concat(regexp_extract(string(day_of_year), '.{2} $') , ' ', month_name) as text_date,
+FROM demo_geo_tracks_silver;
+
+SELECT *
+    FROM demo_geo_tracks_silver_time
+    LIMIT 10;
+----
+
+[source,output,role=output]
+----
++-----------------+------+-------------+------------+-------+------+------------+-----------+-------------+
+| track_id        | hour | day_of_year | month_year | month | year | month_name | day_name  | text_date   |
++-----------------+------+-------------+------------+-------+------+------------+-----------+-------------+
+| 8205566762.fit  | 16   | 08-23       | 2022-08    | 8     | 2022 | August     | Tuesday   | 23 August   |
++-----------------+------+-------------+------------+-------+------+------------+-----------+-------------+
+| 5758691664.fit  | 18   | 06-03       | 2021-06    | 6     | 2021 | June       | Thursday  | 03 June     |
++-----------------+------+-------------+------------+-------+------+------------+-----------+-------------+
+| 7562241822.fit  | 15   | 05-07       | 2022-05    | 5     | 2022 | May        | Saturday  | 07 May      |
++-----------------+------+-------------+------------+-------+------+------------+-----------+-------------+
+| 5752363946.fit  | 15   | 06-02       | 2021-06    | 6     | 2021 | June       | Wednesday | 02 June     |
++-----------------+------+-------------+------------+-------+------+------------+-----------+-------------+
+| 5774225138.fit  | 8    | 06-06       | 2021-06    | 6     | 2021 | June       | Sunday    | 06 June     |
++-----------------+------+-------------+------------+-------+------+------------+-----------+-------------+
+| 3602018438.fit  | 14   | 04-29       | 2020-04    | 4     | 2020 | April      | Wednesday | 29 April    |
++-----------------+------+-------------+------------+-------+------+------------+-----------+-------------+
+| 2665481253.fit  | 18   | 07-06       | 2019-07    | 7     | 2019 | July       | Saturday  | 06 July     |
++-----------------+------+-------------+------------+-------+------+------------+-----------+-------------+
+| 5061483340.fit  | 7    | 02-06       | 2021-02    | 2     | 2021 | February   | Saturday  | 06 February |
++-----------------+------+-------------+------------+-------+------+------------+-----------+-------------+
+| 1842519266.fit  | 9    | 07-21       | 2018-07    | 7     | 2018 | July       | Saturday  | 21 July     |
++-----------------+------+-------------+------------+-------+------+------------+-----------+-------------+
+| 11417255201.fit | 14   | 02-01       | 2024-02    | 2     | 2024 | February   | Thursday  | 01 February |
++-----------------+------+-------------+------------+-------+------+------------+-----------+-------------+
+----
+
+
+Let's make a graph that shows the total distance in kilometres over the entire time in activities starting at each hour of the day. To join the `demo_geo_tracks_silver_time` and `demo_geo_tracks_silver` tables by the `track_id` column, we will use the expression `xref:ROOT:sql_queries/join.adoc[JOIN]` with the `USING` parameter.
+
+To fill the rows with empty hours we use the functions `xref:ROOT:functions/utilities.adoc#unnest[unnest]` and `xref:ROOT:functions/utilities.adoc#generate_series[generate_series]`.
+
+
+[source,SQL]
+----
+CREATE OR REPLACE TABLE demo_geo_tracks_hour AS
+SELECT
+    distance,
+    hour,
+    time_stamp
+FROM demo_geo_tracks_silver_time
+    JOIN demo_geo_tracks_silver
+        USING (track_id);
+    
+-- Добавляем пустые часы
+INSERT INTO demo_geo_tracks_hour (hour, distance)
+    SELECT unnest(generate_series(23)), 0;
+    
+SELECT
+    round(sum(distance)) AS "Total distance, km",
+    hour AS Hour
+FROM demo_geo_tracks_hour
+GROUP BY 2
+ORDER BY 2;
+----
+
+[source,output,role=output]
+----
+Done in 9.5 sec.
+
++--------------------+------+
+| Total distance, km | Hour |
++--------------------+------+
+| 0                  | 0    |
++--------------------+------+
+| 0                  | 1    |
++--------------------+------+
+| 0                  | 2    |
++--------------------+------+
+| 0                  | 3    |
++--------------------+------+
+| 250                | 4    |
++--------------------+------+
+| 2332               | 5    |
++--------------------+------+
+| 7448               | 6    |
++--------------------+------+
+| 8365               | 7    |
++--------------------+------+
+| 9719               | 8    |
++--------------------+------+
+| 4949               | 9    |
++--------------------+------+
+| ...                | ...  |
++--------------------+------+
+24 rows
+----
+
+
+To display the chart, let's use the *Chart* tab in the cell output interface:
+
+image::{page-version}@ROOT:geo_data/img3.png[]
+
+
+Now plot a graph to show the total distance in kilometres for each month for the whole time.
+
+[source,SQL]
+----
+SELECT
+    round(sum(distance)) AS "Total distance, km",
+    month,
+FROM demo_geo_tracks_silver_time
+    JOIN demo_geo_tracks_silver
+        USING (track_id)
+GROUP BY 2
+ORDER BY 2
+----
+
+[source,output,role=output]
+----
+Done in 8.2 sec.
+
++--------------------+-------+
+| total distance, km | month |
++--------------------+-------+
+| 6580               | 1     |
++--------------------+-------+
+| 4419               | 2     |
++--------------------+-------+
+| 5380               | 3     |
++--------------------+-------+
+| 9122               | 4     |
++--------------------+-------+
+| 9514               | 5     |
++--------------------+-------+
+| 10578              | 6     |
++--------------------+-------+
+| 13225              | 7     |
++--------------------+-------+
+| 12298              | 8     |
++--------------------+-------+
+| 9250               | 9     |
++--------------------+-------+
+| 9072               | 10    |
++--------------------+-------+
+| 5537               | 11    |
++--------------------+-------+
+| 4419               | 12    |
++--------------------+-------+
+----
+
+To display the chart, let's use the *Chart* tab in the cell output interface:
+
+image::{page-version}@ROOT:geo_data/img4.png[]
+
+Expectedly, in the winter months, the total distance is significantly less than in the summer months.
+
+
+Let us now plot the total distances in kilometres for each date in the given months on a single graph. For this example, let's take February and July as the months with the lowest and highest total distance.
+
+[source,SQL]
+----
+SELECT
+    round(sum(distance)) AS "Total distance, km",
+    day_of_year,
+FROM demo_geo_tracks_silver_time
+    JOIN demo_geo_tracks_silver
+        USING (track_id)
+WHERE month (2,7)
+GROUP BY 2
+ORDER BY 2
+----
+
+[source,output,role=output]
+----
+Done in 8.1 sec.
+
++--------------------+-------------+
+| total distance, km | day_of_year |
++--------------------+-------------+
+| 160                | 02-01       |
++--------------------+-------------+
+| 194                | 02-02       |
++--------------------+-------------+
+| 137                | 02-03       |
++--------------------+-------------+
+| 194                | 02-04       |
++--------------------+-------------+
+| 245                | 02-05       |
++--------------------+-------------+
+| ...                | ...         |
++--------------------+-------------+
+60 rows
+----
+
+
+image::{page-version}@ROOT:geo_data/img5.png[]
+
+Now let's rank the days of the week -- order the days of the week by total distance in kilometres for the whole time, starting with the maximum.
+
+[source,SQL]
+----
+SELECT
+    round(sum(distance)) AS "Total distance, km",
+    day_name as "Day of week",
+FROM demo_geo_tracks_silver_time
+    JOIN demo_geo_tracks_silver
+        USING track_id
+GROUP BY 2
+ORDER BY 1 DESC
+----
+
+[source,output,role=output]
+----
+Done in 8.4 sec.
+
++--------------------+-------------+
+| total distance, km | day of week |
++--------------------+-------------+
+| 21636              | Saturday    |
++--------------------+-------------+
+| 19006              | Sunday      |
++--------------------+-------------+
+| 13817              | Thursday    |
++--------------------+-------------+
+| 12453              | Tuesday     |
++--------------------+-------------+
+| 12400              | Wednesday   |
++--------------------+-------------+
+| 10696              | Friday      |
++--------------------+-------------+
+| 9386               | Monday      |
++--------------------+-------------+
+----
+
+=== Changes in indicators for the whole period
+
+Now let's display on one graph the changes in activity indicators over time with segmentation by quarters. To do this, we will use the `xref:ROOT:functions/date_time.adoc#date_trunc[date_trunc]` function with the `quarter` parameter. Let's take the following indicators:
+
+* total distance
+* average time per activity
+* average altitude gain per activity
+* average number of calories consumed per activity
+
+
+[source,SQL]
+----
+SELECT
+    round(avg("Elevation Gain")) AS "avg elevation gain, m",
+    round(avg("Moving Time")/3.6) AS "avg moving time, h/10",
+    round(avg(Calories)) AS "avg calories spent, cal",
+    round(sum(distance)) AS "total distance, km",
+    period
+FROM (SELECT
+        distance,
+        "Elevation Gain",
+        "Moving Time",
+        Calories,
+        date_trunc('quarter', time_stamp) AS period
+        FROM demo_geo_tracks_silver
+            JOIN demo_geo_tracks_silver_time
+                USING (track_id)
+        )
+GROUP BY period
+ORDER BY period
+----
+
+[source,output,role=output]
+----
+Done in 8.3 sec.
+
++-----------------------+-----------------------+-------------------------+--------------------+------------+
+| avg elevation gain, m | avg moving time, h/10 | avg calories spent, cal | total distance, km | period     |
++-----------------------+-----------------------+-------------------------+--------------------+------------+
+| 52                    | 485                   | 322                     | 423                | 2014-07-01 |
++-----------------------+-----------------------+-------------------------+--------------------+------------+
+| 60                    | 597                   | 389                     | 438                | 2014-10-01 |
++-----------------------+-----------------------+-------------------------+--------------------+------------+
+| 46                    | 623                   | null                    | 41                 | 2015-01-01 |
++-----------------------+-----------------------+-------------------------+--------------------+------------+
+| 60                    | 676                   | 502                     | 390                | 2015-04-01 |
++-----------------------+-----------------------+-------------------------+--------------------+------------+
+| 310                   | 1394                  | 816                     | 1426               | 2015-07-01 |
++-----------------------+-----------------------+-------------------------+--------------------+------------+
+| ...                   | ...                   | ...                     | ...                | ...        |
++-----------------------+-----------------------+-------------------------+--------------------+------------+
+45 rows
+----
+
+Since changes in all these indicators generally indicate an improvement in the athlete's training level, we will choose the *Stacked Area* chart type, in which the values of the indicators are added together:
+
+image::{page-version}@ROOT:geo_data/img6.png[]
+
+This graph shows, firstly, an increase in all the indicators and, secondly, a decrease in the seasonal factor over time.
+
+Let's display statistics on total mileage in Russia / outside Russia and in virtual races with segmentation by quarters in one graph.
+
+
+[source,SQL]
+----
+SELECT
+    round(sum(CASE WHEN country == 'Россия' AND NOT "Activity Type" = 'Virtual Ride'
+        THEN distance END))
+    AS "Russia total, km",
+    round(sum(CASE WHEN NOT country == 'Россия' AND NOT "Activity Type" = 'Virtual Ride'
+        THEN distance END))
+    AS "Outside Russia total, km",
+    round(sum(CASE WHEN "Activity Type" = 'Virtual Ride' THEN distance END))
+    AS "Virtual Ride total, km",
+    date_trunc('quarter', time_stamp) AS period
+FROM demo.geo_tracks_silver
+GROUP BY period
+ORDER BY period
+----
+
+[source,output,role=output]
+----
+Done in 8.7 sec.
+
++------------------+--------------------------+------------------------+------------+
+| russia total, km | outside russia total, km | virtual ride total, km | period     |
++------------------+--------------------------+------------------------+------------+
+| 423              | null                     | null                   | 2014-07-01 |
++------------------+--------------------------+------------------------+------------+
+| 438              | null                     | null                   | 2014-10-01 |
++------------------+--------------------------+------------------------+------------+
+| 29               | 12                       | null                   | 2015-01-01 |
++------------------+--------------------------+------------------------+------------+
+| 365              | 25                       | null                   | 2015-04-01 |
++------------------+--------------------------+------------------------+------------+
+| 857              | 569                      | null                   | 2015-07-01 |
++------------------+--------------------------+------------------------+------------+
+| ...              | ...                      | ...                    | ...        |
++------------------+--------------------------+------------------------+------------+
+45 rows
+----
+
+The *Stacked Bar* type would work well for this type of chart:
+
+image::{page-version}@ROOT:geo_data/img11.png[]
+
+In this graph you can see different dependencies: the seasonal factor affects the number of virtual rides -- in winter there are more of them; activities outside Russia are first only in summer periods, and later the activities outside Russia remain the only ones. We can also see a general decrease in the seasonal factor, as in the previous graph.
+
+[id=geo_analysis]
+=== Analysing points by their distance from a given point
+
+We know that the user whose activity archive we are studying lived in Moscow, so let's try to analyse his activity depending on the distance from Moscow. To do this, let's take the coordinates https://ru.wikipedia.org/wiki/%D0%9D%D1%83%D0%BB%D0%B5%D0%B2%D0%BE%D0%B9_%D0%BA%D0%B8%D0%BB%D0%BE%D0%BC%D0%B5%D1%82%D1%80[zero kilometre,window=_blank] of Moscow: `55.75579845052788, 37.617679973467204` and create a table where for each activity we will calculate the distance of its starting point from Moscow in kilometres:
+
+[source,SQL]
+----
+CREATE OR REPLACE TABLE demo_geo_tracks_by_moscow AS
+SELECT
+    ST_Distance_Sphere(ST_Point(track_first_coord_lat, track_first_coord_lon), 
+                       ST_Point(55.75579845052788, 37.617679973467204)
+                       )/1000 
+    AS km_from_moscow,
+    track_id,
+FROM demo_geo_tracks_silver;
+
+SELECT * FROM demo_geo_tracks_by_moscow
+    LIMIT 10;
+----
+
+[source,output,role=output]
+----
+Done in 9.3 sec.
+
++--------------------+-----------------+
+| km_from_moscow     | track_id        |
++--------------------+-----------------+
+| 1614.8913738847054 | 8205566762.fit  |
++--------------------+-----------------+
+| 8.000389153235107  | 5758691664.fit  |
++--------------------+-----------------+
+| 2196.013494904038  | 7562241822.fit  |
++--------------------+-----------------+
+| 6.0300128287340815 | 5752363946.fit  |
++--------------------+-----------------+
+| 88.17899082303168  | 5774225138.fit  |
++--------------------+-----------------+
+| 6.033077121995654  | 3602018438.fit  |
++--------------------+-----------------+
+| 890.3163236663786  | 2665481253.fit  |
++--------------------+-----------------+
+| 7501.918475014584  | 5061483340.fit  |
++--------------------+-----------------+
+| 2.926600115019104  | 1842519266.fit  |
++--------------------+-----------------+
+| 3770.6424243313804 | 11417255201.fit |
++--------------------+-----------------+
+----
+
+
+Let's look at the distribution of the total length of the tracks depending on the distance of the track start from Moscow 
+in steps of 100 kilometres. For this purpose we will use the function `xref:ROOT:functions/numeric.adoc#floor[floor]`.
+
+[source,SQL]
+----
+SELECT
+	floor(km_from_moscow/100)*100 AS "Distance from Moscow, km",
+	round(sum(distance)) AS "Total tracks distance, km"
+FROM demo_geo_tracks_by_moscow
+    JOIN demo_geo_tracks_silver
+        USING (track_id)
+    WHERE NOT "Activity Type" = 'Virtual Ride'
+GROUP BY 1
+ORDER BY 1;
+----
+
+[source,output,role=output]
+----
+Done in 8.3 sec.
+
++--------------------------+---------------------------+
+| distance from moscow, km | total tracks distance, km |
++--------------------------+---------------------------+
+| 0                        | 35205                     |
++--------------------------+---------------------------+
+| 100                      | 457                       |
++--------------------------+---------------------------+
+| 200                      | 5                         |
++--------------------------+---------------------------+
+| 800                      | 1191                      |
++--------------------------+---------------------------+
+| 1200                     | 613                       |
++--------------------------+---------------------------+
+| ...                      | ...                       |
++--------------------------+---------------------------+
+29 rows
+----
+
+
+image::{page-version}@ROOT:geo_data/img7.png[]
+
+On the graph we can see that there are several columns noticeably higher than the neighbouring ones. They correspond to the different cities from which the user made regular workouts. Apart from Moscow, these are three cities:
+
+* Malaga -- `https://www.google.com/maps/place/36.71011042348239,-4.429510437480414["36.71011042348239, -4.429510437480414",window=_blank]`
+* Berlin -- `https://www.google.com/maps/place/52.51622694136956,13.377732359062023["52.51622694136956, 13.377732359062023",window=_blank]`
+* Alanya -- `https://www.google.com/maps/place/36.544934513586334,31.993451012738028["36.544934513586334, 31.993451012738028",window=_blank]`
+
+Let's calculate for all activities the distances to these cities:
+
+[source,SQL]
+----
+CREATE OR REPLACE TABLE demo_geo_tracks_by_cities AS
+SELECT
+    track_id,
+    distance,
+    ST_Distance_Sphere(ST_Point(track_first_coord_lat, track_first_coord_lon), 
+                        ST_Point(55.75579845052788, 37.617679973467204)
+                        )/1000 
+        AS km_from_moscow,
+    ST_Distance_Sphere(ST_Point(track_first_coord_lat, track_first_coord_lon),
+                        ST_Point(36.71011042348239, -4.429510437480414)
+                        )/1000 
+        AS km_from_malaga,
+    ST_Distance_Sphere(ST_Point(track_first_coord_lat, track_first_coord_lon),
+                        ST_Point(52.51622694136956, 13.377732359062023)
+                        )/1000 
+        AS km_from_berlin,
+    ST_Distance_Sphere(ST_Point(track_first_coord_lat, track_first_coord_lon),
+                        ST_Point(36.544934513586334, 31.993451012738028)
+                        )/1000 
+        AS km_from_alanya,
+FROM demo_geo_tracks_silver;
+
+SELECT * FROM demo_geo_tracks_by_cities
+    LIMIT 10;
+----
+
+[source,output,role=output]
+----
++-----------------+----------+--------------------+--------------------+--------------------+--------------------+
+| track_id        | distance | km_from_moscow     | km_from_malaga     | km_from_berlin     | km_from_alanya     |
++-----------------+----------+--------------------+--------------------+--------------------+--------------------+
+| 8205566762.fit  | 51.04    | 1614.8913738847054 | 2235.249319891205  | 5.0145197840760245 | 2294.093997594629  |
++-----------------+----------+--------------------+--------------------+--------------------+--------------------+
+| 5758691664.fit  | 3.91     | 8.000389153235107  | 3787.2509319742358 | 1618.720214954235  | 2180.111417985302  |
++-----------------+----------+--------------------+--------------------+--------------------+--------------------+
+| 7562241822.fit  | 21.69    | 2196.013494904038  | 3104.0466510427395 | 2221.451446627775  | 127.78858146201004 |
++-----------------+----------+--------------------+--------------------+--------------------+--------------------+
+| 5752363946.fit  | 62.85    | 6.0300128287340815 | 3785.4665468428007 | 1616.7118606890685 | 2180.242964284234  |
++-----------------+----------+--------------------+--------------------+--------------------+--------------------+
+| 5774225138.fit  | 114.24   | 88.17899082303168  | 3707.0000971542977 | 1528.712391035889  | 2186.697705370458  |
++-----------------+----------+--------------------+--------------------+--------------------+--------------------+
+| 3602018438.fit  | 34.76    | 6.033077121995654  | 3785.4691666595877 | 1616.7152967306572 | 2180.24094049402   |
++-----------------+----------+--------------------+--------------------+--------------------+--------------------+
+| 2665481253.fit  | 43.88    | 890.3163236663786  | 3051.4212916480724 | 811.7057240823138  | 2370.646300384682  |
++-----------------+----------+--------------------+--------------------+--------------------+--------------------+
+| 5061483340.fit  | 16.87    | 7501.918475014584  | 5886.25300373306   | 6375.612772054101  | 8583.236350749687  |
++-----------------+----------+--------------------+--------------------+--------------------+--------------------+
+| 1842519266.fit  | 71.94    | 2.926600115019104  | 3780.985953704283  | 1612.7664280078745 | 2176.465565328427  |
++-----------------+----------+--------------------+--------------------+--------------------+--------------------+
+| 11417255201.fit | 30.91    | 3770.6424243313804 | 12.516233931245793 | 2232.9498881694144 | 3217.9897501282717 |
++-----------------+----------+--------------------+--------------------+--------------------+--------------------+
+----
+
+
+Let's derive statistics on the total distance of tracks with start in different cities. As a threshold value of distance we take `100 km`:
+
+[source,SQL]
+----
+SELECT
+    round(sum(CASE WHEN km_from_moscow < 100 THEN distance END))
+        AS "Moscow total, km",
+    round(sum(CASE WHEN km_from_malaga < 100 THEN distance END))
+        AS "Malaga total, km",
+    round(sum(CASE WHEN km_from_alanya < 100 THEN distance END))
+        AS "Alanya total, km",
+    round(sum(CASE WHEN km_from_berlin < 100 THEN distance END))
+        AS "Berlin total, km",
+    round(sum(CASE WHEN 
+        (
+            km_from_moscow >= 100 AND
+            km_from_malaga >= 100 AND
+            km_from_alanya >= 100 AND
+            km_from_berlin >= 100
+        )
+        THEN distance END))
+        AS "Rest total, km",
+    round(sum(distance)) AS "Total, km"
+FROM demo_geo_tracks_by_cities
+----
+
+[source,output,role=output]
+----
++------------------+------------------+------------------+------------------+----------------+-----------+
+| moscow total, km | malaga total, km | alanya total, km | berlin total, km | rest total, km | total, km |
++------------------+------------------+------------------+------------------+----------------+-----------+
+| 35155            | 28969            | 8136             | 5841             | 21242          | 99343     |
++------------------+------------------+------------------+------------------+----------------+-----------+
+----
+
+=== Displaying multiple points on the map
+
+To demonstrate the display of points on the map, let's create a separate table with points of one activity within Moscow with the maximum distance for the whole time.
+
+[source,SQL]
+----
+CREATE OR REPLACE TABLE demo_geo_points_for_map AS
+    SELECT * FROM demo_geo_points_silver
+        WHERE 
+        (track_id IN (
+        SELECT track_id
+            from demo_geo_tracks_by_distance
+                JOIN demo_geo_tracks_silver
+                    USING (track_id)
+            WHERE km_from_moscow < 100
+            ORDER BY distance DESC
+            LIMIT 1
+            )
+    );
+
+SELECT count(*) AS "Points for map total" 
+    FROM demo_geo_points_for_map;
+----
+
+[source,output,role=output]
+----
+Done in 9.7 sec.
+
++----------------------+
+| points for map total |
++----------------------+
+| 16458                |
++----------------------+
+----
+
+Now in a cell of type {Python} we will write the code that can be used to access the created table with filtered points and display them on the map https://osm.org/[OSM,window=_blank] using the module {Python} https://github.com/MatthewDaws/TileMapBase[TileMapBase,window=_blank]:
+
+
+[source,python]
+----
+import tngri
+import pyarrow
+import pyiceberg
+from pyiceberg.catalog import load_catalog
+from contextlib import suppress
+import pandas as pd
+import matplotlib.pyplot as plt
+import tilemapbase
+import warnings
+warnings.filterwarnings("ignore")
+
+def print_map(source_table_name):
+
+    # Load the source table
+    source_table = catalog.load_table(source_table_name)
+
+    # Convert to DataFrame
+    trip_df = source_table.scan().to_pandas()
+    print(f'Source table size: {trip_df.shape}')
+
+    tilemapbase.init(create=True)
+
+    # Size of map margins around the extreme points of the track
+    expand=0.01
+    extent = tilemapbase.Extent.from_lonlat(
+        trip_df.longitude.min() - expand,
+        trip_df.longitude.max() + expand,
+        trip_df.latitude.min() - expand,
+        trip_df.latitude.max() + expand,
+    )
+
+    track_names = trip_df['track_id'].unique()
+    print(f 'Number of tracks: {len(track_names)}')
+
+    # Print the total distance of the tracks in the source table
+    print(tngri.sql('''
+    select round(sum(distance)) as "Total distance, km"
+    from demo_geo_tracks_silver
+    where track_id in (
+            select track_id
+            from demo_geo_points_for_map)
+    '''))
+
+    track_list = []
+    for track_name in track_names:
+        track = trip_df.loc[trip_df['track_id'] == track_name].apply(
+            lambda x: tilemapbase.project(x.longitude, x.latitude), axis=1
+        ).apply(pd.Series)
+        track.columns = ["x", "y"]
+        track_list.append(track)
+
+    tiles = tilemapbase.tiles.build_OSM()
+
+    fig, ax = plt.subplots(figsize=(8, 8), dpi=300)
+
+    # height -- map detail
+    plotter = tilemapbase.Plotter(extent, tiles, height=600)
+
+    # alpha -- map clutter
+    plotter.plot(ax, tiles, alpha=0.6)
+
+    # If there are several tracks, make the line thickness smaller
+    if len(track_names) == 1:
+        width = 1
+    else:
+        width = 0.5
+    for track in track_list:
+        ax.plot(track.x, track.y, color='blue', linewidth=width)
+
+    plt.axis('off')
+    fig.get_figure()
+
+print_map('demo_geo_points_for_map')
+----
+
+[source,output,role=output]
+----
+Done in 30 sec.
+
+Размер исходной таблицы: (16458, 8)
+Количество треков: 1
+Суммарная дистанция треков: 135.0 км
+----
+
+image::{page-version}@ROOT:geo_data/img9.png[]
+
+Note that to output the total distance of the displayed tracks, we use the `SELECT` query call in cell {Python} via the `xref:ROOT:functions/tengri_functions.adoc#sql[tngri.sql]` function.
+
+Now let's overwrite the table with the coordinates of the points to be displayed on the map, selecting all activities with a start in Berlin to display them all on the same map.
+
+[source,SQL]
+----
+CREATE OR REPLACE TABLE demo_geo_points_for_map AS
+    SELECT
+        latitude,
+        longitude,
+        track_id
+    FROM demo_geo_points_silver
+    WHERE
+    (track_id IN (
+        SELECT track_id
+            FROM demo_geo_tracks_by_distance
+            WHERE km_from_berlin < 100
+        )
+    );
+
+SELECT * FROM demo_geo_points_for_map
+    LIMIT 10;
+----
+
+[source,output,role=output]
+----
+Done in 9.6 sec.
+
++--------------------+--------------------+----------------+
+| latitude           | longitude          | track_id       |
++--------------------+--------------------+----------------+
+| 52.529693618416786 | 13.444848032668233 | 9440992383.fit |
++--------------------+--------------------+----------------+
+| 52.52970124594867  | 13.44483470544219  | 9440992383.fit |
++--------------------+--------------------+----------------+
+| 52.52970124594867  | 13.44481467269361  | 9440992383.fit |
++--------------------+--------------------+----------------+
+| 52.52969739027321  | 13.444789862260222 | 9440992383.fit |
++--------------------+--------------------+----------------+
+| 52.5296859908849   | 13.444773685187101 | 9440992383.fit |
++--------------------+--------------------+----------------+
+| 52.52967827953398  | 13.4447565022856   | 9440992383.fit |
++--------------------+--------------------+----------------+
+| 52.529674507677555 | 13.444727919995785 | 9440992383.fit |
++--------------------+--------------------+----------------+
+| 52.529674507677555 | 13.44469740986824  | 9440992383.fit |
++--------------------+--------------------+----------------+
+| 52.529670652002096 | 13.444674527272582 | 9440992383.fit |
++--------------------+--------------------+----------------+
+| 52.529670652002096 | 13.444655416533351 | 9440992383.fit |
++--------------------+--------------------+----------------+
+----
+
+Let's output the number of points in the created table:
+
+[source,SQL]
+----
+SELECT count(*) AS "Points for map total"
+    FROM demo_geo_points_for_map
+----
+
+[source,output,role=output]
+----
++----------------------+
+| points for map total |
++----------------------+
+| 708616               |
++----------------------+
+----
+
+Run the previously created `print_map` function in cell {Python} for the updated table with the same name and display a map with all the activities in Berlin:
+
+[source,python]
+----
+print_map('demo_geo_points_for_map')
+----
+
+
+[source,output,role=output]
+----
+Done in 1 min. 6 sec.
+
+Размер исходной таблицы: (708616, 3)
+Количество треков: 108
+Суммарная дистанция треков: 5841.0 км
+----
+
+image::{page-version}@ROOT:geo_data/img8.png[]
+
+
+Now let's map all the tracks with the start at https://en.wikipedia.org/wiki/Krylatskoye_Sports_Complex_Velodrome[Velotrek,window=_blank] in Moscow:
+
+[source,SQL]
+----
+CREATE OR REPLACE TABLE demo.geo_points_for_map AS
+SELECT
+    latitude,
+    longitude,
+    track_id 
+FROM demo.geo_points_silver
+WHERE track_id NOT IN
+    (SELECT DISTINCT track_id
+    FROM demo.geo_points_silver
+    WHERE ST_Distance_Sphere(ST_Point(latitude, longitude),
+                           ST_Point(55.76314006886495, 37.43303308055759)
+                           )/1000 > 3);
+                           
+SELECT count(*) AS "Points for map total"
+    FROM demo.geo_points_for_map;
+----
+
+[source,output,role=output]
+----
++----------------------+
+| points for map total |
++----------------------+
+| 215466               |
++----------------------+
+----
+
+Let's start the map display:
+
+[source,python]
+----
+print_map('demo_geo_points_for_map')
+----
+
+[source,output,role=output]
+----
+Done in 39 sec.
+
+Размер исходной таблицы: (215466, 3)
+Количество треков: 43
+Суммарная дистанция треков: 2063.0 км
+----
+
+image::{page-version}@ROOT:geo_data/img10.png[]
+
