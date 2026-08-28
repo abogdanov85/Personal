@@ -1,0 +1,470 @@
+= Analysis and visualisation of passenger flow of Moscow metro stations
+include::partial$dict.adoc[]
+
+In this example, we will show how {Tengri} can be used to analyse and visualise passenger flow data of Moscow metro stations taken from https://data.mos.ru/opendata[open data portal].
+
+[id=source_data_upload]
+== Loading source data
+
+Let's load two datasets :
+
+. https://data.mos.ru/opendata/62743[Passenger flow by Moscow Metro stations]
++
+Columns:
+
+** Metro station
+** Line
+** Year (from 2021 to 2025)
+** Quarter (from Q1 2021 to Q3 2025)
+** Passenger Entrances
+** Passenger exits
+** `global_id`
+
+. https://data.mos.ru/opendata/624[Entrances and exits of Moscow Metro station lobbies]
++
+Columns:
+
+** Local identifier
+** Name
+** On the territory of Moscow
+** Administrative District
+** District
+** Longitude in https://en.wikipedia.org/wiki/World_Geodetic_System#WGS84[WGS-84]
+** Latitude in https://en.wikipedia.org/wiki/World_Geodetic_System#WGS84[WGS-84]
+** Lobby type
+** Metro station
+** Line
+** Status of cultural heritage object
+** Operation mode on even days
+** Operating mode on odd-numbered days
+** Number of fully functional BPAs (all types of tickets)
+** Number of low-functional BPAs (1 and 2-trip tickets)
+** Total number of BPAs
+** Repair of escalators
+** Facility Status
+** `global_id`
+** `geoData`
+** `geodata_center`
+
+Let's export them to `.csv` and upload them to {Tengri} via xref:scenarios/data_upload.adoc#wizard_upload[Upload Wizard].
+
+[id=data_preparation]
+== Data preparation
+
+For both datasets we create tables from the downloaded `.csv` files:
+
+[.wrap,SQL]
+----
+CREATE TABLE data_mos_ru.metro_passenger_traffic AS
+SELECT
+    *
+FROM read_csv('abogdanov/5cfdf5609fd3_data-62743-2025-10-16_metro_passengers.csv', header = TRUE)
+----
+
+[source,output,role=output]
+----
+Done in 1.4 sec.
+----
+
+[.wrap,SQL]
+----
+CREATE TABLE data_mos_ru.metro_exits AS
+SELECT
+    *
+FROM read_csv('abogdanov/18123c3d0536_data-624-2025-11-12_metro_exits.csv', header = TRUE)
+----
+
+[source,output,role=output]
+----
+Done in 1.6 sec.
+----
+
+No additional transformations need to be done for this data.
+
+Note that there are zero values in the passenger traffic data for 2025:
+
+[source,SQL]
+----
+SELECT
+    distinct(NameOfStation) AS Station
+FROM data_mos_ru.metro_passenger_traffic
+WHERE (IncomingPassengers = 0 OR OutgoingPassengers = 0)
+    AND YEAR = '2025'
+----
+
+[source,output,role=output]
+----
++-------------------------+
+| Station                 |
++-------------------------+
+| Петровско-Разумовская   |
++-------------------------+
+| Киевская                |
++-------------------------+
+| Третьяковская           |
++-------------------------+
+| Театральная             |
++-------------------------+
+| Библиотека имени Ленина |
++-------------------------+
+| Китай-город             |
++-------------------------+
+| Шелепиха                |
++-------------------------+
+| Тверская                |
++-------------------------+
+| Каширская               |
++-------------------------+
+| Улица Старокачаловская  |
++-------------------------+
+----
+
+Obviously, this group includes stations with cross-platform transfer (with common passenger flow) and some other cases, which probably do not have relevant data for the specified period. These cases will be treated separately below.
+
+== Visualisation 1: overlay of total station passenger flow data on the map
+
+First, using {SQL}-query to both tables, we will display the total passenger flow for 2025 for all stations with the coordinates of one (randomly selected) exit for each station. To select one exit from each station we will use the function `xref:functions/window.adoc#row_number[row_number]`.
+
+For stations with zero passenger flow we set the value `10000` so that their points are displayed on the map as bubbles with some minimum radius (see below).
+
+[source,SQL]
+----
+WITH
+    exits AS
+    (SELECT *
+    FROM
+        (SELECT
+            NameOfStation,
+            Line,
+            ID,
+            Latitude_WGS84,
+            Longitude_WGS84,
+            row_number() OVER (PARTITION BY NameOfStation, Line ORDER BY ID) AS rn
+        FROM data_mos_ru.metro_exits)
+    WHERE rn = 1),
+    
+    p_traffic AS
+    (SELECT
+        Line,
+        NameOfStation,
+        sum(IncomingPassengers + OutgoingPassengers)::BIGINT AS total_pass,
+    FROM data_mos_ru.metro_passenger_traffic
+    WHERE YEAR = '2025'
+    GROUP BY Line, NameOfStation)
+
+SELECT
+    e.NameOfStation,
+    e.Line,
+    CASE
+        WHEN p.total_pass = 0 THEN 10000
+        ELSE p.total_pass
+    END AS pass_per_station,
+    e.Latitude_WGS84::DOUBLE,
+    e.Longitude_WGS84::DOUBLE,
+FROM exits e
+JOIN p_traffic p 
+    ON e.NameOfStation = p.NameOfStation AND e.Line = p.Line
+ORDER BY pass_per_station DESC
+----
+
+[source,output,role=output]
+----
++----------------------------+----------------------------------+------------------+----------------+-----------------+
+| NameOfStation              | Line                             | pass_per_station | Latitude_WGS84 | Longitude_WGS84 |
++----------------------------+----------------------------------+------------------+----------------+-----------------+
+| Комсомольская              | Кольцевая линия                  | 41853178         | 55.77277242    | 37.65842913     |
++----------------------------+----------------------------------+------------------+----------------+-----------------+
+| ВДНХ                       | Калужско-Рижская линия           | 35503085         | 55.82028       | 37.63995318     |
++----------------------------+----------------------------------+------------------+----------------+-----------------+
+| Щёлковская                 | Арбатско-Покровская линия        | 33734009         | 55.81067852    | 37.79882138     |
++----------------------------+----------------------------------+------------------+----------------+-----------------+
+| Китай-город                | Калужско-Рижская линия           | 31327022         | 55.75699088    | 37.63079068     |
++----------------------------+----------------------------------+------------------+----------------+-----------------+
+| Новогиреево                | Калининская линия                | 30043613         | 55.75214727    | 37.81528665     |
++----------------------------+----------------------------------+------------------+----------------+-----------------+
+| Домодедовская              | Замоскворецкая линия             | 29873341         | 55.61130823    | 37.71793662     |
++----------------------------+----------------------------------+------------------+----------------+-----------------+
+| Котельники                 | Таганско-Краснопресненская линия | 28396610         | 55.67527909    | 37.85631134     |
++----------------------------+----------------------------------+------------------+----------------+-----------------+
+| Выхино                     | Таганско-Краснопресненская линия | 28339777         | 55.71574531    | 37.81902166     |
++----------------------------+----------------------------------+------------------+----------------+-----------------+
+| Некрасовка                 | Некрасовская линия               | 28272684         | 55.70268563    | 37.92909816     |
++----------------------------+----------------------------------+------------------+----------------+-----------------+
+| Кузьминки                  | Таганско-Краснопресненская линия | 26526308         | 55.70552184    | 37.767736       |
++----------------------------+----------------------------------+------------------+----------------+-----------------+
+| ...                        | ...                              | ...              | ....           | ...             |
++----------------------------+----------------------------------+------------------+----------------+-----------------+
+301 rows
+----
+
+We obtained a table 301 rows long, where for each station the total passenger flow (column `pass_per_station`) and the coordinates of one exit from this station are given.
+
+Now let's save this result in a DataFrame to visualise this data using {Python}:
+
+[source,python]
+----
+df = cell_output
+df.shape
+----
+
+[source,output,role=output]
+----
+(301, 5)
+----
+
+Visualise the data -- display the results on the map as coloured bubbles of proportional size with a number inside each bubble (rounded `pass_per_station` value). We will use the packages {Python} `matplotlib` and `tilemapbase` for this purpose. The colour of the bubbles will correspond to the colour of the metro lines.
+
+
+[source,python]
+----
+import pandas as pd
+import tilemapbase
+import matplotlib.pyplot as plt
+import matplotlib.patheffects as path_effects
+
+# Разные случаи для визуализации
+if 'pass_per_exit' in df:
+    per_exit = True
+else:
+    per_exit = False
+
+# Словарь цветов для линий
+color_map = {
+    'Сокольническая линия': '#EF161E',
+    'Замоскворецкая линия': '#2DBE2C',
+    'Арбатско-Покровская линия': '#0078BF',
+    'Филёвская линия': '#00BFFF',
+    'Кольцевая линия': '#8D5B2D',
+    'Калужско-Рижская линия': '#ED9121',
+    'Таганско-Краснопресненская линия': '#800080',
+    'Калининская линия': '#FFD702',
+    'Солнцевская линия': '#FFD702',
+    'Серпуховско-Тимирязевская линия': '#ACADAF',
+    'Люблинско-Дмитровская линия': '#B1D332',
+    'Большая кольцевая линия': '#82C0C0',
+    'Бутовская линия': '#A1B2D4',
+    'Монорельс': '#9999FF',
+    'Московское центральное кольцо': '#EF161E',
+    'Некрасовская линия': '#DE64A1',
+    'Троицкая линия': '#55BBAA'
+}
+
+# Инициализация карты
+tilemapbase.init(create=True)
+t = tilemapbase.tiles.build_OSM()
+
+# Определение границ (автоматически по точкам)
+margin = 0.03
+extent = tilemapbase.Extent.from_lonlat(
+    df['Longitude_WGS84'].min() - margin, df['Longitude_WGS84'].max() + margin,
+    df['Latitude_WGS84'].min() - margin, df['Latitude_WGS84'].max() + margin
+).to_aspect(1.0)
+
+# Построение карты
+
+# Сторона картинки
+side = 30
+
+# Разрешение
+my_dpi = 200
+
+# Детализация карты
+fig, ax = plt.subplots(figsize=(side, side), dpi=my_dpi)
+plotter = tilemapbase.Plotter(extent, t, width=2000)
+
+# Прозрачность карты
+plotter.plot(ax, alpha=0.5)
+
+# Проецируем координаты и отображаем пузыри
+for t_type, group in df.groupby('Line'):
+    if 'pass_per_exit' in group:
+        bubble_sizes = group['pass_per_exit']/5000
+    elif 'pass_per_station' in group:
+        bubble_sizes = group['pass_per_station']/5000
+    else:
+        print("No column for bubbles")
+    
+    # Преобразование координат
+    projected = [tilemapbase.project(lon, lat) 
+                for lon, lat in 
+                zip(group['Longitude_WGS84'], group['Latitude_WGS84'])
+                ]
+    x, y = zip(*projected)
+    
+    # Рисуем группу точек данного типа
+    ax.scatter(x, y, s=bubble_sizes, 
+               c=color_map.get(t_type, 'grey'), 
+               label=t_type, alpha=0.6, edgecolors='white', linewidth=1)
+    
+    # Добавляем числа внутри пузырей
+    for i, (px, py) in enumerate(projected):
+        if per_exit:
+            break
+            
+        val = group['pass_per_station'].iloc[i]
+        
+        # Пропускаем совсем маленькие значения, чтобы не загромождать карту
+        if val <= 10000:
+            continue
+        
+        # Динамический размер шрифта в зависимости от размера пузыря (от 7 до 14)
+        dynamic_fs = min(max(val / 1000000 + 4, 7), 14)
+        
+        label_text = round(val/1000000, 1)
+        txt = ax.text(px, py, label_text, 
+                      fontsize=dynamic_fs,
+                      ha='center', 
+                      va='center', 
+                      color='black', 
+                      zorder=10) # Текст всегда поверх пузырей
+
+        txt.set_path_effects([])
+
+if per_exit:
+    title_text = """Средний пассажиропоток в 2025 для каждого выхода со станции
+                    Выполнено на Tengri Data Platform"""
+else:
+    title_text = """Суммарный пассажиропоток в 2025 (млн. пассажиров)
+                    Выполнено на Tengri Data Platform"""
+    
+# Легенда и оформление
+leg = ax.legend(
+    [], [], 
+    title = title_text, 
+    loc = 'upper left',
+    title_fontsize=20)
+    
+ax.axis("off")
+plt.tight_layout()
+
+plt.show()
+----
+
+image::{page-version}@ROOT:metro_traffic/metro_traffic_2025_ForDocs.png[]
+
+== Visualisation 2: map overlay of average passenger flow data for each exit of the station
+
+Now let's perform another analysis -- show the passenger flow for each station exit. To do this we will make {SQL}-query, which will output as a result all exits from all stations with total passenger flow for this station averaged by the number of exits from it.
+
+Of course, passenger flow for different exits from one station is not evenly distributed, but for the purposes of this analysis we neglect this fact. It is only important for us to show the average passenger flow for each exit from each station.
+
+As in the previous case, we fix a specific value for zero values of passenger flow -- `30000` -- so that these points are shown on the map with a fixed minimum radius.
+
+[source,SQL]
+----
+WITH
+    exits AS (
+    SELECT
+        NameOfStation, 
+        Line, 
+        ID,
+        Latitude_WGS84,
+        Longitude_WGS84,
+        COUNT(ID) OVER(PARTITION By Line, NameOfStation) AS exit_count
+    FROM data_mos_ru.metro_exits
+    ORDER BY NameOfStation, Line
+    ),
+
+    p_traffic AS (
+    SELECT
+        Line,
+        NameOfStation,
+        sum(IncomingPassengers + OutgoingPassengers) AS total_pass,
+    FROM data_mos_ru.metro_passenger_traffic
+    where Year = '2025'
+    group by Line, NameOfStation
+    )
+
+SELECT
+row_number() OVER (ORDER BY pass_per_exit DESC) AS Number,
+*
+FROM
+    (SELECT
+        e.NameOfStation,
+            CASE
+            WHEN p.total_pass = 0 THEN 30000
+            ELSE round(p.total_pass/e.exit_count, 0)
+        END AS pass_per_exit,
+        e.Line,
+        e.ID,
+        e.Latitude_WGS84::double,
+        e.Longitude_WGS84::double,
+    FROM exits e
+    JOIN p_traffic p
+        ON e.NameOfStation = p.NameOfStation AND e.Line = p.Line
+    LIMIT 2000)
+LIMIT 2000
+----
+
+[source,output,role=output]
+----
++--------+------------------+---------------+----------------------------------+------+----------------+-----------------+
+| Number | NameOfStation    | pass_per_exit | Line                             | ID   | Latitude_WGS84 | Longitude_WGS84 |
++--------+------------------+---------------+----------------------------------+------+----------------+-----------------+
+| 1      | Бауманская       | 26048544      | Арбатско-Покровская линия        | 67   | 55.77235365    | 37.67881348     |
++--------+------------------+---------------+----------------------------------+------+----------------+-----------------+
+| 2      | Алексеевская     | 15398714      | Калужско-Рижская линия           | 346  | 55.80794887    | 37.63862334     |
++--------+------------------+---------------+----------------------------------+------+----------------+-----------------+
+| 3      | Третьяковская    | 15373178      | Калининская линия                | 316  | 55.74075073    | 37.6256243      |
++--------+------------------+---------------+----------------------------------+------+----------------+-----------------+
+| 4      | Новокузнецкая    | 15222223      | Замоскворецкая линия             | 138  | 55.7422711     | 37.62919995     |
++--------+------------------+---------------+----------------------------------+------+----------------+-----------------+
+| 5      | Фрунзенская      | 15056953      | Сокольническая линия             | 645  | 55.72741432    | 37.5805915      |
++--------+------------------+---------------+----------------------------------+------+----------------+-----------------+
+| 6      | Смоленская       | 14915387      | Арбатско-Покровская линия        | 60   | 55.74793747    | 37.58374859     |
++--------+------------------+---------------+----------------------------------+------+----------------+-----------------+
+| 7      | Новослободская   | 14873169      | Кольцевая линия                  | 388  | 55.7794912     | 37.6011113      |
++--------+------------------+---------------+----------------------------------+------+----------------+-----------------+
+| 8      | Семёновская      | 14541055      | Арбатско-Покровская линия        | 71   | 55.78315566    | 37.71929008     |
++--------+------------------+---------------+----------------------------------+------+----------------+-----------------+
+| 9      | Электрозаводская | 13189122      | Арбатско-Покровская линия        | 69   | 55.78208775    | 37.70537507     |
++--------+------------------+---------------+----------------------------------+------+----------------+-----------------+
+| 10     | Павелецкая       | 13140061      | Кольцевая линия                  | 422  | 55.73143729    | 37.63609491     |
++--------+------------------+---------------+----------------------------------+------+----------------+-----------------+
+| 11     | Павелецкая       | 13140061      | Кольцевая линия                  | 922  | 55.73139794    | 37.6366689      |
++--------+------------------+---------------+----------------------------------+------+----------------+-----------------+
+| 12     | Медведково       | 13037367      | Калужско-Рижская линия           | 372  | 55.88795799    | 37.66142575     |
++--------+------------------+---------------+----------------------------------+------+----------------+-----------------+
+| 13     | Медведково       | 13037367      | Калужско-Рижская линия           | 370  | 55.88600671    | 37.66127198     |
++--------+------------------+---------------+----------------------------------+------+----------------+-----------------+
+| 14     | Таганская        | 12633092      | Кольцевая линия                  | 420  | 55.74236743    | 37.65363339     |
++--------+------------------+---------------+----------------------------------+------+----------------+-----------------+
+| 15     | Нижегородская    | 12070723      | Некрасовская линия               | 1213 | 55.73199803    | 37.72925764     |
++--------+------------------+---------------+----------------------------------+------+----------------+-----------------+
+| 16     | Нижегородская    | 12070723      | Некрасовская линия               | 1212 | 55.73089923    | 37.73089647     |
++--------+------------------+---------------+----------------------------------+------+----------------+-----------------+
+| 17     | Баррикадная      | 11979753      | Таганско-Краснопресненская линия | 777  | 55.760671      | 37.581254       |
++--------+------------------+---------------+----------------------------------+------+----------------+-----------------+
+| 18     | Кузнецкий мост   | 11488826      | Таганско-Краснопресненская линия | 779  | 55.76154829    | 37.62421828     |
++--------+------------------+---------------+----------------------------------+------+----------------+-----------------+
+| 19     | Цветной бульвар  | 11481480      | Серпуховско-Тимирязевская линия  | 571  | 55.77165653    | 37.62070698     |
++--------+------------------+---------------+----------------------------------+------+----------------+-----------------+
+| 20     | Проспект Мира    | 11361865      | Кольцевая линия                  | 392  | 55.77959625    | 37.63352421     |
++--------+------------------+---------------+----------------------------------+------+----------------+-----------------+
+| ...    | ...              | ...           | ...                              | ...  | ...            | ...             |
++--------+------------------+---------------+----------------------------------+------+----------------+-----------------+
+999+ rows
+----
+
+We obtained a table in which each row corresponds to one exit from each station and for this exit its coordinates and average passenger flow are displayed. The data are ordered by decreasing passenger flow, so this rating is interesting by itself -- without visualisation on the map, as it allows us to find out which stations are "record-breakers" in terms of the load at their exits. Expectedly, the first positions were occupied by very busy stations with only one exit.
+
+For ease of use, we have numbered the rows of this table using the nested `SELECT` and the function `xref:functions/window.adoc#row_number[row_number]`. The full table is available xref:{page-version}@ROOT:attachment$metro_exits_traffic_2025.xlsx[here]. 
+
+Now let's overlay the passenger flow data for each exit on the map as the same coloured bubbles as in the previous case. We will not output the numbers in the bubbles, since in very many cases the bubbles overlap each other (the exits are close to each other). To do this, we will first write the result of the previous cell to the DataFrame, and then use the same script at {Python} as described above -- we have provided slightly different processing for the two cases.
+
+[source,python]
+----
+df = cell_output
+df.shape
+----
+
+[source,output,role=output]
+----
+(1154, 7)
+----
+
+In this case, the resulting table has 1154 rows -- this is the total number of exits from all stations.
+
+The result of the visualisation for this DataFrame:
+
+image::{page-version}@ROOT:metro_traffic/metro_exits_ForDocs.png[]
