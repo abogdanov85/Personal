@@ -671,7 +671,7 @@ Done in 8.5 sec.
 
 To display the chart, let's use the *Chart* tab in the cell output interface:
 
-image::{page-version}@ROOT:geo_data/img1.png[]
+image::images/geo_data/img1.png[]
 
 We have a graph that simultaneously displays several different metrics for a given activity -- speed, altitude, and power. Hovering the mouse over a line on the graph shows the value at that point. In these graphs, users can examine the metrics as they relate to each other. For example, in this case, you can see that speed increases on downhills and power decreases on uphills, while the opposite is true on uphills.
 
@@ -714,7 +714,7 @@ Done in 8.2 sec.
 
 To display the chart, let's use the *Chart* tab in the cell output interface:
 
-image::{page-version}@ROOT:geo_data/img2.png[]
+image::images/geo_data/img2.png[]
 
 We have obtained a graph of power distribution within one activity in 25 watt increments.
 
@@ -833,7 +833,7 @@ Done in 9.5 sec.
 
 To display the chart, let's use the *Chart* tab in the cell output interface:
 
-image::{page-version}@ROOT:geo_data/img3.png[]
+image::images/geo_data/img3.png[]
 
 
 Now plot a graph to show the total distance in kilometres for each month for the whole time.
@@ -885,7 +885,7 @@ Done in 8.2 sec.
 
 To display the chart, let's use the *Chart* tab in the cell output interface:
 
-image::{page-version}@ROOT:geo_data/img4.png[]
+image::images/geo_data/img4.png[]
 
 Expectedly, in the winter months, the total distance is significantly less than in the summer months.
 
@@ -928,7 +928,7 @@ Done in 8.1 sec.
 ----
 
 
-image::{page-version}@ROOT:geo_data/img5.png[]
+image::images/geo_data/img5.png[]
 
 Now let's rank the days of the week -- order the days of the week by total distance in kilometres for the whole time, starting with the maximum.
 
@@ -1023,7 +1023,7 @@ Done in 8.3 sec.
 
 Since changes in all these indicators generally indicate an improvement in the athlete's training level, we will choose the *Stacked Area* chart type, in which the values of the indicators are added together:
 
-image::{page-version}@ROOT:geo_data/img6.png[]
+image::images/geo_data/img6.png[]
 
 This graph shows, firstly, an increase in all the indicators and, secondly, a decrease in the seasonal factor over time.
 
@@ -1071,7 +1071,7 @@ Done in 8.7 sec.
 
 The *Stacked Bar* type would work well for this type of chart:
 
-image::{page-version}@ROOT:geo_data/img11.png[]
+image::images/geo_data/img11.png[]
 
 In this graph you can see different dependencies: the seasonal factor affects the number of virtual rides -- in winter there are more of them; activities outside Russia are first only in summer periods, and later the activities outside Russia remain the only ones. We can also see a general decrease in the seasonal factor, as in the previous graph.
 
@@ -1164,7 +1164,7 @@ Done in 8.3 sec.
 ----
 
 
-image::{page-version}@ROOT:geo_data/img7.png[]
+image::images/geo_data/img7.png[]
 
 On the graph we can see that there are several columns noticeably higher than the neighbouring ones. They correspond to the different cities from which the user made regular workouts. Apart from Moscow, these are three cities:
 
@@ -1389,7 +1389,7 @@ Done in 30 sec.
 Суммарная дистанция треков: 135.0 км
 ----
 
-image::{page-version}@ROOT:geo_data/img9.png[]
+image::images/geo_data/img9.png[]
 
 Note that to output the total distance of the displayed tracks, we use the `SELECT` query call in cell {Python} via the `xref:ROOT:functions/tengri_functions.adoc#sql[tngri.sql]` function.
 
@@ -1478,7 +1478,7 @@ Done in 1 min. 6 sec.
 Суммарная дистанция треков: 5841.0 км
 ----
 
-image::{page-version}@ROOT:geo_data/img8.png[]
+image::images/geo_data/img8.png[]
 
 
 Now let's map all the tracks with the start at https://en.wikipedia.org/wiki/Krylatskoye_Sports_Complex_Velodrome[Velotrek,window=_blank] in Moscow:
@@ -1527,5 +1527,5 @@ Done in 39 sec.
 Суммарная дистанция треков: 2063.0 км
 ----
 
-image::{page-version}@ROOT:geo_data/img10.png[]
+image::images/geo_data/img10.png[]
 

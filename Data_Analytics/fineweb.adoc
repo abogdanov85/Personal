@@ -1121,7 +1121,7 @@ Done in 2 min. 12 sec.
 Now let's plot the graph based on the results obtained:
 
 [id=graph_1]
-image::{page-version}@ROOT:fineweb/img01.png[]
+image::images/fineweb/img01.png[]
 
 We see that the frequency of mentions for yoga has increased in recent years and overtaken other sports, while the frequency of mentions for basketball and baseball has fallen and equalled the frequency for football (`soccer`). We also see `soccer` mentions peaking in 2018 -- that's when the World Cup was held.
 
@@ -1186,7 +1186,7 @@ Done in 21 min 10 sec.
 
 Let's draw a graph:
 
-image::{page-version}@ROOT:fineweb/img02.png[]
+image::images/fineweb/img02.png[]
 
 In this case, the order of the absolute numbers being compared is stem:[10^5]. And we can note that the lines are smoother on this graph than on the <<graph_1, previous>>. This is an important point -- with more data, there are fewer random fluctuations in the graph, and only real trends remain. This shows firstly that the data is consistent, and secondly that our analysis reveals the real patterns present in these texts.
 
@@ -1252,7 +1252,7 @@ Done in 15 min.
 
 Let's draw a graph:
 
-image::{page-version}@ROOT:fineweb/img03.png[]
+image::images/fineweb/img03.png[]
 
 We see that the frequency of mentions of these words in the early years of our observation period had one ratio, and in recent years -- the ratio has changed, and `android` has become more frequently mentioned than `iphone`. And we have a clear point in time when this ratio changed -- 2017.
 
@@ -1321,7 +1321,7 @@ Done in 18 min.
 
 Let's construct a graph based on this data:
 
-image::{page-version}@ROOT:fineweb/img04.png[]
+image::images/fineweb/img04.png[]
 
 
 === Telegram, Whatsapp and Snapchat
@@ -1382,7 +1382,7 @@ Done in 17 min.
 
 Let's draw a graph:
 
-image::{page-version}@ROOT:fineweb/img05.png[]
+image::images/fineweb/img05.png[]
 
 
 === Musical artists
@@ -1444,7 +1444,7 @@ Done in 17 min.
 
 Let's construct a graph based on this data:
 
-image::{page-version}@ROOT:fineweb/img06.png[]
+image::images/fineweb/img06.png[]
 
 Note that in this case, the absolute numbers are an order of magnitude smaller than in the previous examples, so we multiply the results by `10^5` in the query and use the captions for the graph
 ifeval::["{page-localization}" == "RU"]

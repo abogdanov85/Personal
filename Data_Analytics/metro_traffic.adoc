@@ -340,7 +340,7 @@ plt.tight_layout()
 plt.show()
 ----
 
-image::{page-version}@ROOT:metro_traffic/metro_traffic_2025_ForDocs.png[]
+image::images/metro_traffic/metro_traffic_2025_ForDocs.png[]
 
 == Visualisation 2: map overlay of average passenger flow data for each exit of the station
 
@@ -467,4 +467,4 @@ In this case, the resulting table has 1154 rows -- this is the total number of e
 
 The result of the visualisation for this DataFrame:
 
-image::{page-version}@ROOT:metro_traffic/metro_exits_ForDocs.png[]
+image::images/metro_traffic/metro_exits_ForDocs.png[]
