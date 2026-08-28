@@ -1,6 +1,7 @@
 = Analysing texts on the example of FineWeb dataset
 include::partial$dict.adoc[]
 
+
 This example demonstrates how large text corpora can be analysed using {Tengri}.
 
 We will use the dataset https://huggingface.co/datasets/HuggingFaceFW/fineweb[FineWeb, window=_blank] for the analysis. It consists of over *18.5 trillion* tokens of cleaned and deduplicated English-language texts from the web from https://en.wikipedia.org/wiki/Common_Crawl[CommonCrawl, window=_blank]. Essentially this dataset consists of casts of the entire English-speaking internet at a specific point in time (from 2013 to 2025). It is used mainly for training {LLM}.
